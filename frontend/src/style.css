@@ -1,16 +1,16 @@
 :root {
   color-scheme: light;
-  --ink: #0f172a;
-  --muted: #64748b;
-  --accent: #145bff;
-  --accent-2: #00b3c6;
-  --page-bg: #f1f4f9;
+  --ink: #1f2937;
+  --muted: #6b7280;
+  --accent: #2563eb;
+  --accent-2: #1d4ed8;
+  --page-bg: #eef1f5;
   --panel: #ffffff;
-  --surface-alt: #f8fafc;
-  --border: rgba(15, 23, 42, 0.08);
-  --shadow: 0 16px 30px rgba(15, 23, 42, 0.08);
-  --shadow-soft: 0 10px 22px rgba(15, 23, 42, 0.06);
-  --radius: 16px;
+  --surface-alt: #f6f7f9;
+  --border: rgba(17, 24, 39, 0.12);
+  --shadow: 0 6px 16px rgba(17, 24, 39, 0.08);
+  --shadow-soft: 0 4px 10px rgba(17, 24, 39, 0.06);
+  --radius: 10px;
 }
 
 * {
@@ -25,9 +25,9 @@ body,
 
 body {
   margin: 0;
-  font-family: "Manrope", "IBM Plex Sans", "Segoe UI", sans-serif;
+  font-family: "Segoe UI", "IBM Plex Sans", "Manrope", sans-serif;
   color: var(--ink);
-  background: radial-gradient(circle at top left, #f8fafc 0%, #eef2f8 45%, #e6ecf5 100%);
+  background: var(--page-bg);
 }
 
 @keyframes fadeSlide {
@@ -42,5 +42,5 @@ body {
 }
 
 .app-shell {
-  animation: fadeSlide 320ms ease-out;
+  animation: fadeSlide 200ms ease-out;
 }
