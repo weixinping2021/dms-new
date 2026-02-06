@@ -1,0 +1,46 @@
+:root {
+  color-scheme: light;
+  --ink: #0f172a;
+  --muted: #64748b;
+  --accent: #145bff;
+  --accent-2: #00b3c6;
+  --page-bg: #f1f4f9;
+  --panel: #ffffff;
+  --surface-alt: #f8fafc;
+  --border: rgba(15, 23, 42, 0.08);
+  --shadow: 0 16px 30px rgba(15, 23, 42, 0.08);
+  --shadow-soft: 0 10px 22px rgba(15, 23, 42, 0.06);
+  --radius: 16px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: "Manrope", "IBM Plex Sans", "Segoe UI", sans-serif;
+  color: var(--ink);
+  background: radial-gradient(circle at top left, #f8fafc 0%, #eef2f8 45%, #e6ecf5 100%);
+}
+
+@keyframes fadeSlide {
+  0% {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.app-shell {
+  animation: fadeSlide 320ms ease-out;
+}
