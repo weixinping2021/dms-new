@@ -17,6 +17,7 @@ import {
   FileTextOutlined
 } from '@ant-design/icons';
 import mysqlLogo from './assets/images/mysql.svg';
+import { EventsOn } from '../wailsjs/runtime/runtime';
 
 // @ts-ignore - 引入 Wails 自动生成的后端接口
 import {
@@ -37,9 +38,11 @@ import {
   SaveExcelFromJSON,
   ExportSqlDump,
   GetProcessList,
+  GetAppSettings,
   KillProcess,
   GetDatabasesForConfig,
   GetTableStats,
+  SaveAppSettings,
   SyncDatabase
 } from '../wailsjs/go/main/App';
 
@@ -127,6 +130,9 @@ const App: React.FC = () => {
   const [exportTables, setExportTables] = useState<string[]>([]);
   const [exportSearch, setExportSearch] = useState('');
   const [exportMode, setExportMode] = useState<'schema' | 'data' | 'both'>('schema');
+  const [exportLogs, setExportLogs] = useState<string[]>([]);
+  const exportLogRef = useRef<HTMLDivElement | null>(null);
+  const [appSettings, setAppSettings] = useState<{ mysqldumpPath: string }>({ mysqldumpPath: '' });
   const [sessionRows, setSessionRows] = useState<any[]>([]);
   const [sessionLoading, setSessionLoading] = useState(false);
   const [sessionCommand, setSessionCommand] = useState<string | undefined>(undefined);
@@ -144,6 +150,8 @@ const App: React.FC = () => {
   const [migrationCheck, setMigrationCheck] = useState<Array<{ name: string; sourceRows: number; targetRows: number; status: string }>>([]);
   const [migrationSources, setMigrationSources] = useState<Record<string, string[]>>({});
   const [migrationTargets, setMigrationTargets] = useState<Record<string, string[]>>({});
+  const [migrationLogs, setMigrationLogs] = useState<string[]>([]);
+  const migrationLogRef = useRef<HTMLDivElement | null>(null);
   const [sessionAuto, setSessionAuto] = useState(false);
   const [sessionInterval, setSessionInterval] = useState(5);
   const [selectedSessionIds, setSelectedSessionIds] = useState<number[]>([]);
@@ -164,6 +172,7 @@ const App: React.FC = () => {
   // --- 初始化 ---
   useEffect(() => {
     fetchSavedConnections();
+    loadAppSettings();
     ensureInitialTab();
   }, []);
 
@@ -189,6 +198,15 @@ const App: React.FC = () => {
       });
     } catch (err) {
       message.error('获取保存的连接失败');
+    }
+  };
+
+  const loadAppSettings = async () => {
+    try {
+      const res = await GetAppSettings();
+      setAppSettings({ mysqldumpPath: res?.mysqldumpPath || '' });
+    } catch (err) {
+      message.error('获取设置失败');
     }
   };
 
@@ -704,7 +722,7 @@ const App: React.FC = () => {
         message.error('检测不通过：目标库存在冲突表/数据');
         return;
       }
-      await SyncDatabase(sourceConn, migrationSourceDb, targetConn, migrationTargetDb, migrationMode);
+      await SyncDatabase(sourceConn, migrationSourceDb, targetConn, migrationTargetDb, migrationMode, migrationSourceTables);
       message.success('同步完成');
     } catch (err) {
       message.error('同步失败: ' + err);
@@ -785,6 +803,34 @@ const App: React.FC = () => {
     return () => clearInterval(timer);
   }, [sessionAuto, sessionInterval, activeTab?.key, activeTab?.kind, activeTab?.connId]);
 
+  useEffect(() => {
+    if (activeTab?.kind !== 'migration') return;
+    setMigrationLogs([]);
+    const off = EventsOn('migration-log', (msg: string) => {
+      setMigrationLogs(prev => [...prev, msg]);
+    });
+    return () => off();
+  }, [activeTab?.kind, activeTab?.key]);
+
+  useEffect(() => {
+    if (!migrationLogRef.current) return;
+    migrationLogRef.current.scrollTop = migrationLogRef.current.scrollHeight;
+  }, [migrationLogs.length]);
+
+  useEffect(() => {
+    if (!isExportOpen) return;
+    setExportLogs([]);
+    const off = EventsOn('export-log', (msg: string) => {
+      setExportLogs(prev => [...prev, msg]);
+    });
+    return () => off();
+  }, [isExportOpen]);
+
+  useEffect(() => {
+    if (!exportLogRef.current) return;
+    exportLogRef.current.scrollTop = exportLogRef.current.scrollHeight;
+  }, [exportLogs.length]);
+
   const handleExportSql = async () => {
     if (!exportDb) return;
     if (exportTables.length === 0) {
@@ -792,13 +838,14 @@ const App: React.FC = () => {
       return;
     }
     try {
+      await SaveAppSettings(appSettings);
       const savedPath = await ExportSqlDump({ ...exportDb.conn, database: exportDb.db }, exportTables, exportMode);
       if (!savedPath) {
         message.info('已取消导出');
         return;
       }
       message.success('导出成功');
-      setIsExportOpen(false);
+      //setIsExportOpen(false);
     } catch (err) {
       message.error('导出失败: ' + err);
     }
@@ -1304,9 +1351,11 @@ const App: React.FC = () => {
         </Text>
         <div className="app-header-actions">
           <div className="header-toolbar">
-            <Button size="small" icon={<DatabaseOutlined />} onClick={openMigrationTab}>
-              数据库迁移
-            </Button>
+            <Button size="small" icon={<DatabaseOutlined />} />
+            <Button size="small" icon={<ReloadOutlined />} onClick={() => activeConn && handleConnect(activeConn)} />
+            <Button size="small" icon={<ConsoleSqlOutlined />} onClick={addTab} />
+            <Button size="small" icon={<DesktopOutlined />} onClick={openSessionTab} />
+            <Button size="small" icon={<DatabaseOutlined />} onClick={openMigrationTab} />
           </div>
         </div>
       </Header>
@@ -1635,6 +1684,11 @@ const App: React.FC = () => {
                                 placeholder="选择表（可多选）"
                                 value={migrationSourceTables}
                                 onChange={(value) => setMigrationSourceTables(value)}
+                                showSearch
+                                optionFilterProp="label"
+                                maxTagCount={3}
+                                maxTagTextLength={20}
+                                maxTagPlaceholder={(omitted) => `+${omitted.length} 个`}
                                 options={(tableList[migrationSourceConn]?.[migrationSourceDb] || []).map(t => ({
                                   label: t.name,
                                   value: t.name
@@ -1678,6 +1732,17 @@ const App: React.FC = () => {
                               开始同步
                             </Button>
                           </Space>
+                        </div>
+
+                        <div className="migration-log-title">迁移日志</div>
+                        <div className="migration-log" ref={migrationLogRef}>
+                          {migrationLogs.length === 0 ? (
+                            <div className="migration-log-empty">等待开始迁移...</div>
+                          ) : (
+                            migrationLogs.map((line, idx) => (
+                              <div key={`${line}-${idx}`} className="migration-log-line">{line}</div>
+                            ))
+                          )}
                         </div>
 
                         <div className="migration-result">
@@ -1876,6 +1941,8 @@ const App: React.FC = () => {
         okText="导出"
         cancelText="取消"
         width={520}
+        maskClosable={false}
+        keyboard={false}
       >
         <div className="export-tip">请选择要导出的表：</div>
         <div className="export-mode">
@@ -1891,6 +1958,15 @@ const App: React.FC = () => {
               结构+数据
             </Button>
           </Space>
+        </div>
+        <div className="export-mysqldump">
+          <Text type="secondary">mysqldump 路径（可选）：</Text>
+          <Input
+            placeholder="留空自动查找，如 /usr/local/bin/mysqldump"
+            value={appSettings.mysqldumpPath}
+            onChange={(e) => setAppSettings(prev => ({ ...prev, mysqldumpPath: e.target.value }))}
+            allowClear
+          />
         </div>
         <Input
           placeholder="搜索表名..."
@@ -1925,6 +2001,16 @@ const App: React.FC = () => {
               <span>{t.name}</span>
             </label>
           ))}
+        </div>
+        <div className="export-log-title">导出日志</div>
+        <div className="export-log" ref={exportLogRef}>
+          {exportLogs.length === 0 ? (
+            <div className="export-log-empty">等待开始导出...</div>
+          ) : (
+            exportLogs.map((line, idx) => (
+              <div key={`${line}-${idx}`} className="export-log-line">{line}</div>
+            ))
+          )}
         </div>
       </Modal>
 

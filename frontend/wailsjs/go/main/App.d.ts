@@ -14,6 +14,8 @@ export function ExecuteQueryWithColumns(arg1:string):Promise<main.QueryResult>;
 
 export function ExportSqlDump(arg1:main.DBConfig,arg2:Array<string>,arg3:string):Promise<string>;
 
+export function GetAppSettings():Promise<main.AppSettings>;
+
 export function GetColumns(arg1:string):Promise<Array<main.ColumnMeta>>;
 
 export function GetDatabases():Promise<Array<string>>;
@@ -32,6 +34,8 @@ export function GetViews(arg1:string):Promise<Array<main.ViewMeta>>;
 
 export function KillProcess(arg1:number):Promise<void>;
 
+export function SaveAppSettings(arg1:main.AppSettings):Promise<void>;
+
 export function SaveConnection(arg1:main.DBConfig):Promise<void>;
 
 export function SaveExcelFile(arg1:string,arg2:string):Promise<string>;
@@ -40,7 +44,7 @@ export function SaveExcelFromJSON(arg1:string,arg2:string):Promise<string>;
 
 export function SaveTextFile(arg1:string,arg2:string):Promise<string>;
 
-export function SyncDatabase(arg1:main.DBConfig,arg2:string,arg3:main.DBConfig,arg4:string,arg5:string):Promise<string>;
+export function SyncDatabase(arg1:main.DBConfig,arg2:string,arg3:main.DBConfig,arg4:string,arg5:string,arg6:Array<string>):Promise<string>;
 
 export function TestConnection(arg1:string):Promise<void>;
 

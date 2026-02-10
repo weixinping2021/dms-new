@@ -4,19 +4,25 @@ import (
 	"context"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
+	"time"
+	"unicode/utf8"
 
+	"github.com/go-mysql-org/go-mysql/dump"
 	_ "github.com/go-sql-driver/mysql"
 	mysqlDriver "github.com/go-sql-driver/mysql"
-	"github.com/sparkedhost/go-mysqldump"
-	"github.com/xuri/excelize/v2"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
+	"github.com/xuri/excelize/v2"
 )
 
 // App struct
@@ -35,6 +41,21 @@ func NewApp() *App {
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	_ = loadSavedConfigs()
+	_ = loadAppSettings()
+}
+
+// LogBridge 用于捕获 mysqldump 的 stderr 并转发到 Wails 前端
+type LogBridge struct {
+	ctx       context.Context
+	eventName string
+}
+
+func (l *LogBridge) Write(p []byte) (n int, err error) {
+	if l.ctx != nil {
+		// 实时发送日志到前端
+		runtime.EventsEmit(l.ctx, l.eventName, string(p))
+	}
+	return len(p), nil
 }
 
 // ConnectDB 连接数据库
@@ -247,6 +268,10 @@ type DBConfig struct {
 	Database string `json:"database"`
 }
 
+type AppSettings struct {
+	MysqldumpPath string `json:"mysqldumpPath"`
+}
+
 type TableMeta struct {
 	Name      string `json:"name"`
 	Rows      int64  `json:"rows"`
@@ -270,6 +295,7 @@ type TableStat struct {
 
 // 模拟内存存储，实际开发建议写入文件
 var savedConfigs = []DBConfig{}
+var appSettings = AppSettings{}
 
 func configFilePath() (string, error) {
 	dir, err := os.UserConfigDir()
@@ -277,6 +303,15 @@ func configFilePath() (string, error) {
 		return "", err
 	}
 	path := filepath.Join(dir, "dms-new", "connections.json")
+	return path, nil
+}
+
+func settingsFilePath() (string, error) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, "dms-new", "settings.json")
 	return path, nil
 }
 
@@ -315,9 +350,55 @@ func persistSavedConfigs() error {
 	return os.WriteFile(path, data, 0o600)
 }
 
+func loadAppSettings() error {
+	path, err := settingsFilePath()
+	if err != nil {
+		return err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	var s AppSettings
+	if err := json.Unmarshal(data, &s); err != nil {
+		return err
+	}
+	appSettings = s
+	return nil
+}
+
+func persistAppSettings() error {
+	path, err := settingsFilePath()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(appSettings, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o600)
+}
+
 // GetSavedConnections 获取已保存的连接
 func (a *App) GetSavedConnections() []DBConfig {
 	return savedConfigs
+}
+
+// GetAppSettings 获取应用设置
+func (a *App) GetAppSettings() AppSettings {
+	return appSettings
+}
+
+// SaveAppSettings 保存应用设置
+func (a *App) SaveAppSettings(s AppSettings) error {
+	appSettings = s
+	return persistAppSettings()
 }
 
 // SaveConnection 保存新连接
@@ -627,7 +708,7 @@ func (a *App) SaveExcelFromJSON(suggestedName string, jsonData string) (string, 
 	}
 
 	var payload struct {
-		Headers []string               `json:"headers"`
+		Headers []string                 `json:"headers"`
 		Rows    []map[string]interface{} `json:"rows"`
 	}
 	var rows []map[string]interface{}
@@ -734,135 +815,414 @@ func (a *App) SaveTextFile(suggestedName string, content string) (string, error)
 	return path, nil
 }
 
+func fetchAllTableNames(db *sql.DB, database string) ([]string, error) {
+	rows, err := db.Query(`SELECT TABLE_NAME FROM information_schema.tables WHERE table_schema = ? AND table_type = 'BASE TABLE'`, database)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tables []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		tables = append(tables, name)
+	}
+	return tables, nil
+}
+
+func writeSchemaTo(w io.Writer, db *sql.DB, database string, tables []string) error {
+	if _, err := fmt.Fprintf(w, "CREATE DATABASE IF NOT EXISTS `%s`;\nUSE `%s`;\n", database, database); err != nil {
+		return err
+	}
+	for _, table := range tables {
+		var name string
+		var createSQL string
+		row := db.QueryRow(fmt.Sprintf("SHOW CREATE TABLE `%s`.`%s`", database, table))
+		if err := row.Scan(&name, &createSQL); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(w, "%s;\n", createSQL); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (a *App) newGoMysqlDumper(cfg DBConfig, executionPath string) (*dump.Dumper, error) {
+	addr := net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
+	d, err := dump.NewDumper(executionPath, addr, cfg.User, cfg.Password)
+	if err != nil {
+		return nil, err
+	}
+	d.ExtraOptions = append(d.ExtraOptions, "--extended-insert", "--verbose", "--set-gtid-purged=OFF")
+	d.SkipMasterData(true)
+	d.SetErrOut(&LogBridge{ctx: a.ctx, eventName: "export-log"})
+	return d, nil
+}
+
+func (a *App) dumpDataTo(w io.Writer, cfg DBConfig, tables []string, executionPath string) error {
+	d, err := a.newGoMysqlDumper(cfg, executionPath)
+	if err != nil {
+		return err
+	}
+	if len(tables) > 0 {
+		d.AddTables(cfg.Database, tables...)
+	} else {
+		d.AddDatabases(cfg.Database)
+	}
+	return d.Dump(w)
+}
+
+func escapeSQLString(s string) string {
+	replacer := strings.NewReplacer(
+		"\\", "\\\\",
+		"'", "\\'",
+		"\n", "\\n",
+		"\r", "\\r",
+		"\t", "\\t",
+		"\x00", "\\0",
+	)
+	return replacer.Replace(s)
+}
+
+func valueToSQL(v interface{}) string {
+	if v == nil {
+		return "NULL"
+	}
+	switch t := v.(type) {
+	case []byte:
+		if utf8.Valid(t) {
+			return "'" + escapeSQLString(string(t)) + "'"
+		}
+		return "0x" + hex.EncodeToString(t)
+	case string:
+		return "'" + escapeSQLString(t) + "'"
+	case time.Time:
+		return "'" + t.Format("2006-01-02 15:04:05") + "'"
+	case bool:
+		if t {
+			return "1"
+		}
+		return "0"
+	case int, int8, int16, int32, int64:
+		return fmt.Sprintf("%d", t)
+	case uint, uint8, uint16, uint32, uint64:
+		return fmt.Sprintf("%d", t)
+	case float32, float64:
+		return fmt.Sprintf("%v", t)
+	default:
+		return "'" + escapeSQLString(fmt.Sprintf("%v", t)) + "'"
+	}
+}
+
+func writeTableDataTo(w io.Writer, db *sql.DB, database string, table string, batchSize int) (int64, error) {
+	rows, err := db.Query(fmt.Sprintf("SELECT * FROM `%s`.`%s`", database, table))
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+
+	cols, err := rows.Columns()
+	if err != nil {
+		return 0, err
+	}
+	colList := make([]string, len(cols))
+	for i, c := range cols {
+		colList[i] = fmt.Sprintf("`%s`", c)
+	}
+	colSQL := strings.Join(colList, ", ")
+
+	values := make([]interface{}, len(cols))
+	valuePtrs := make([]interface{}, len(cols))
+	for i := range values {
+		valuePtrs[i] = &values[i]
+	}
+
+	var (
+		batchCount int
+		totalCount int64
+		builder    strings.Builder
+	)
+
+	flush := func() error {
+		if batchCount == 0 {
+			return nil
+		}
+		builder.WriteString(";\n")
+		if _, err := io.WriteString(w, builder.String()); err != nil {
+			return err
+		}
+		builder.Reset()
+		batchCount = 0
+		return nil
+	}
+
+	for rows.Next() {
+		if err := rows.Scan(valuePtrs...); err != nil {
+			return totalCount, err
+		}
+		rowVals := make([]string, len(values))
+		for i, v := range values {
+			switch b := v.(type) {
+			case []byte:
+				copied := make([]byte, len(b))
+				copy(copied, b)
+				rowVals[i] = valueToSQL(copied)
+			default:
+				rowVals[i] = valueToSQL(v)
+			}
+		}
+
+		if batchCount == 0 {
+			builder.WriteString("INSERT INTO `")
+			builder.WriteString(table)
+			builder.WriteString("` (")
+			builder.WriteString(colSQL)
+			builder.WriteString(") VALUES ")
+		} else {
+			builder.WriteString(", ")
+		}
+		builder.WriteString("(")
+		builder.WriteString(strings.Join(rowVals, ", "))
+		builder.WriteString(")")
+		batchCount++
+		totalCount++
+
+		if batchCount >= batchSize {
+			if err := flush(); err != nil {
+				return totalCount, err
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return totalCount, err
+	}
+	if err := flush(); err != nil {
+		return totalCount, err
+	}
+	return totalCount, nil
+}
+
 // ExportSqlDump 使用开源库导出SQL（结构/数据/结构+数据）
 func (a *App) ExportSqlDump(cfg DBConfig, tables []string, mode string) (string, error) {
 	if a.ctx == nil {
 		return "", fmt.Errorf("应用未初始化")
 	}
+	log := func(format string, args ...interface{}) {
+		ts := time.Now().Format("15:04:05")
+		runtime.EventsEmit(a.ctx, "export-log", fmt.Sprintf("[%s] %s", ts, fmt.Sprintf(format, args...)))
+	}
 	if cfg.Host == "" || cfg.User == "" || cfg.Port == 0 || cfg.Database == "" {
+		log("导出失败：连接信息不完整")
 		return "", fmt.Errorf("连接信息不完整")
 	}
 	if len(tables) == 0 {
+		log("导出失败：未选择任何表")
 		return "", fmt.Errorf("请选择至少一个表")
 	}
 
+	log("开始导出数据库：%s", cfg.Database)
 	dsn, err := buildDSN(cfg)
 	if err != nil {
+		log("构建连接信息失败：%v", err)
 		return "", err
 	}
+	log("连接数据库 %s:%d", cfg.Host, cfg.Port)
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
+		log("连接数据库失败：%v", err)
 		return "", err
 	}
 	defer db.Close()
 
-	allRows, err := db.Query(`SELECT TABLE_NAME FROM information_schema.tables WHERE table_schema = ? AND table_type = 'BASE TABLE'`, cfg.Database)
+	log("已选择导出 %d 张表", len(tables))
+	fileName := fmt.Sprintf("%s.sql", cfg.Database)
+	log("准备保存文件：%s", fileName)
+	path, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
+		DefaultFilename: fileName,
+		Filters: []runtime.FileFilter{
+			{DisplayName: "SQL", Pattern: "*.sql"},
+		},
+	})
 	if err != nil {
+		log("选择保存路径失败：%v", err)
 		return "", err
 	}
-	defer allRows.Close()
-
-	selected := map[string]bool{}
-	for _, t := range tables {
-		selected[t] = true
+	if path == "" {
+		log("已取消保存")
+		return "", nil
 	}
-	var ignore []string
-	for allRows.Next() {
-		var name string
-		if err := allRows.Scan(&name); err != nil {
+
+	file, err := os.Create(path)
+	if err != nil {
+		log("创建文件失败：%v", err)
+		return "", err
+	}
+	defer file.Close()
+
+	if mode == "schema" || mode == "both" {
+		log("导出表结构")
+		if err := writeSchemaTo(file, db, cfg.Database, tables); err != nil {
+			log("导出表结构失败：%v", err)
 			return "", err
 		}
-		if !selected[name] {
-			ignore = append(ignore, name)
+	}
+	if mode == "data" || mode == "both" {
+		log("导出表数据")
+		if appSettings.MysqldumpPath == "" {
+			log("mysqldump 路径：自动查找")
+		} else {
+			log("mysqldump 路径：%s", appSettings.MysqldumpPath)
 		}
+		if mode == "both" {
+			_, _ = io.WriteString(file, "\n")
+		}
+		start := time.Now()
+		if err := a.dumpDataTo(file, cfg, tables, appSettings.MysqldumpPath); err != nil {
+			log("导出表数据失败：%v", err)
+			return "", err
+		}
+		log("数据导出完成，用时 %s", time.Since(start).Truncate(time.Millisecond))
 	}
 
-	var buf strings.Builder
-	dumper := mysqldump.Data{
-		Out:          &buf,
-		Connection:   db,
-		IgnoreTables: ignore,
-	}
-	if err := dumper.Dump(); err != nil {
-		return "", err
-	}
-
-	dumpText := buf.String()
-	if mode == "schema" {
-		dumpText = filterDump(dumpText, true, false)
-	} else if mode == "data" {
-		dumpText = filterDump(dumpText, false, true)
-	}
-
-	fileName := fmt.Sprintf("%s.sql", cfg.Database)
-	return a.SaveTextFile(fileName, dumpText)
+	log("保存完成：%s", path)
+	return path, nil
 }
 
 // SyncDatabase 同步数据库（结构/数据/结构+数据）
-func (a *App) SyncDatabase(source DBConfig, sourceDB string, target DBConfig, targetDB string, mode string) (string, error) {
+func (a *App) SyncDatabase(source DBConfig, sourceDB string, target DBConfig, targetDB string, mode string, tables []string) (string, error) {
 	if sourceDB == "" || targetDB == "" {
 		return "", fmt.Errorf("源库和目标库不能为空")
+	}
+	log := func(format string, args ...interface{}) {
+		ts := time.Now().Format("15:04:05")
+		if a.ctx != nil {
+			runtime.EventsEmit(a.ctx, "migration-log", fmt.Sprintf("[%s] %s", ts, fmt.Sprintf(format, args...)))
+		}
 	}
 	source.Database = sourceDB
 	target.Database = targetDB
 
+	log("开始迁移：%s -> %s", sourceDB, targetDB)
 	sourceDSN, err := buildDSN(source)
 	if err != nil {
+		log("构建源库连接失败：%v", err)
 		return "", err
 	}
 	targetDSN, err := buildDSN(target)
 	if err != nil {
+		log("构建目标库连接失败：%v", err)
 		return "", err
 	}
 	srcDB, err := sql.Open("mysql", sourceDSN)
 	if err != nil {
+		log("连接源库失败：%v", err)
 		return "", err
 	}
 	defer srcDB.Close()
 
 	tgtDB, err := sql.Open("mysql", targetDSN)
 	if err != nil {
+		log("连接目标库失败：%v", err)
 		return "", err
 	}
 	defer tgtDB.Close()
 
-	// 确保目标库存在
-	_, err = tgtDB.Exec(fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s`", targetDB))
+	if len(tables) == 0 {
+		allTables, err := fetchAllTableNames(srcDB, sourceDB)
+		if err != nil {
+			log("读取源库表失败：%v", err)
+			return "", err
+		}
+		tables = allTables
+	}
+	if len(tables) == 0 {
+		log("源库没有可迁移的表")
+		return "源库没有可迁移的表", nil
+	}
+
+	dumpFile := filepath.Join(os.TempDir(), fmt.Sprintf("dms_migration_%s_%d.sql", sourceDB, time.Now().Unix()))
+	log("生成本地文件：%s", dumpFile)
+	file, err := os.Create(dumpFile)
 	if err != nil {
+		log("创建本地文件失败：%v", err)
 		return "", err
 	}
 
-	var buf strings.Builder
-	dumper := mysqldump.Data{
-		Out:        &buf,
-		Connection: srcDB,
+	if mode == "schema" || mode == "both" {
+		log("导出表结构")
+		if err := writeSchemaTo(file, srcDB, sourceDB, tables); err != nil {
+			_ = file.Close()
+			log("导出表结构失败：%v", err)
+			return "", err
+		}
 	}
-	if err := dumper.Dump(); err != nil {
+	if mode == "data" || mode == "both" {
+		log("导出表数据")
+		if mode == "both" {
+			_, _ = io.WriteString(file, "\n")
+		}
+		start := time.Now()
+		for _, table := range tables {
+			log("导出表数据：%s", table)
+			count, err := writeTableDataTo(file, srcDB, sourceDB, table, 500)
+			if err != nil {
+				_ = file.Close()
+				log("导出表数据失败：%s, %v", table, err)
+				return "", err
+			}
+			log("表 %s 数据导出完成（%d 行）", table, count)
+		}
+		log("数据导出完成，用时 %s", time.Since(start).Truncate(time.Millisecond))
+	}
+	if err := file.Close(); err != nil {
+		log("关闭本地文件失败：%v", err)
 		return "", err
-	}
-
-	dumpText := buf.String()
-	if mode == "schema" {
-		dumpText = filterDump(dumpText, true, false)
-	} else if mode == "data" {
-		dumpText = filterDump(dumpText, false, true)
 	}
 
 	_, _ = tgtDB.Exec("SET FOREIGN_KEY_CHECKS = 0")
 	_, _ = tgtDB.Exec(fmt.Sprintf("USE `%s`", targetDB))
-	stmts := strings.Split(dumpText, ";\n")
-	for _, stmt := range stmts {
+	dumpBytes, err := os.ReadFile(dumpFile)
+	if err != nil {
+		log("读取本地文件失败：%v", err)
+		return "", err
+	}
+	stmts := strings.Split(string(dumpBytes), ";\n")
+	log("开始执行 SQL（%d 条）", len(stmts))
+	tableName := ""
+	for idx, stmt := range stmts {
 		s := strings.TrimSpace(stmt)
 		if s == "" {
 			continue
 		}
+		upper := strings.ToUpper(s)
+		if strings.HasPrefix(upper, "CREATE TABLE") || strings.HasPrefix(upper, "INSERT INTO") || strings.HasPrefix(upper, "DROP TABLE") || strings.HasPrefix(upper, "ALTER TABLE") {
+			tableName = extractTableName(s)
+			if tableName != "" {
+				log("处理表：%s", tableName)
+			}
+		}
 		if _, err := tgtDB.Exec(s); err != nil {
+			log("执行失败（第 %d 条, 表 %s）：%v", idx+1, tableName, err)
 			return "", err
 		}
 	}
 	_, _ = tgtDB.Exec("SET FOREIGN_KEY_CHECKS = 1")
 
+	log("迁移完成")
 	return "同步完成", nil
+}
+
+func extractTableName(stmt string) string {
+	re := regexp.MustCompile("(?i)^(CREATE\\s+TABLE|INSERT\\s+INTO|DROP\\s+TABLE|ALTER\\s+TABLE)\\s+`?([a-zA-Z0-9_\\-\\.]+)`?")
+	match := re.FindStringSubmatch(stmt)
+	if len(match) >= 3 {
+		return match[2]
+	}
+	return ""
 }
 
 func filterDump(input string, keepSchema bool, keepData bool) string {

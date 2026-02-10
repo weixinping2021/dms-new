@@ -26,6 +26,10 @@ export function ExportSqlDump(arg1, arg2, arg3) {
   return window['go']['main']['App']['ExportSqlDump'](arg1, arg2, arg3);
 }
 
+export function GetAppSettings() {
+  return window['go']['main']['App']['GetAppSettings']();
+}
+
 export function GetColumns(arg1) {
   return window['go']['main']['App']['GetColumns'](arg1);
 }
@@ -62,6 +66,10 @@ export function KillProcess(arg1) {
   return window['go']['main']['App']['KillProcess'](arg1);
 }
 
+export function SaveAppSettings(arg1) {
+  return window['go']['main']['App']['SaveAppSettings'](arg1);
+}
+
 export function SaveConnection(arg1) {
   return window['go']['main']['App']['SaveConnection'](arg1);
 }
@@ -78,8 +86,8 @@ export function SaveTextFile(arg1, arg2) {
   return window['go']['main']['App']['SaveTextFile'](arg1, arg2);
 }
 
-export function SyncDatabase(arg1, arg2, arg3, arg4, arg5) {
-  return window['go']['main']['App']['SyncDatabase'](arg1, arg2, arg3, arg4, arg5);
+export function SyncDatabase(arg1, arg2, arg3, arg4, arg5, arg6) {
+  return window['go']['main']['App']['SyncDatabase'](arg1, arg2, arg3, arg4, arg5, arg6);
 }
 
 export function TestConnection(arg1) {

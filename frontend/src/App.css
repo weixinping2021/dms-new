@@ -28,8 +28,14 @@
 
 .header-toolbar {
   display: inline-flex;
-  gap: 8px;
+  gap: 6px;
   align-items: center;
+}
+
+.header-toolbar .ant-btn {
+  width: 28px;
+  height: 28px;
+  padding: 0;
 }
 
 .brand-chip {
@@ -109,13 +115,30 @@
 
 .sider-menu .ant-menu-item,
 .sider-menu .ant-menu-submenu-title {
-  border-radius: 6px;
-  margin: 4px 0;
+  border-radius: 4px;
+  margin: 2px 0;
+  min-height: 28px;
+  height: 28px;
+  line-height: 28px;
+  padding: 0 8px;
 }
 
 .sider-menu .ant-menu-item-selected {
   background: rgba(37, 99, 235, 0.12);
   font-weight: 600;
+}
+
+.sider-menu .ant-menu-item .anticon,
+.sider-menu .ant-menu-submenu-title .anticon {
+  font-size: 12px;
+}
+
+.tree-node {
+  padding: 2px 4px;
+}
+
+.tree-label {
+  font-size: 12px;
 }
 
 .tree-node {
@@ -178,27 +201,23 @@
   flex-direction: column;
   background: var(--page-bg);
   overflow: hidden;
+  min-height: 0;
 }
 
 .app-content::before {
-  content: "";
-  position: absolute;
-  inset: -20% -10% auto auto;
-  width: 380px;
-  height: 380px;
-  background: radial-gradient(circle, rgba(20, 91, 255, 0.15), rgba(20, 91, 255, 0));
-  pointer-events: none;
-  z-index: 0;
+  content: none;
 }
 
 .workspace {
   display: flex;
   flex-direction: column;
   height: 100%;
-  gap: 12px;
-  padding: 12px;
+  gap: 0;
+  padding: 0;
   position: relative;
   z-index: 1;
+  flex: 1;
+  min-height: 0;
 }
 
 .ant-btn {
@@ -225,10 +244,18 @@
 
 .sql-card {
   background: var(--panel);
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
 }
 
 .sql-card .ant-tabs {
   margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
 }
 
 .sql-card .ant-tabs-nav::before {
@@ -242,6 +269,23 @@
 
 .sql-card .ant-tabs-tab-active {
   background: rgba(20, 91, 255, 0.08);
+}
+
+.sql-card .ant-card-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.sql-card .ant-tabs-content-holder {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.sql-card .ant-tabs-content {
+  height: 100%;
 }
 
 .sql-card-title {
@@ -278,6 +322,10 @@
   display: flex;
   flex-direction: column;
   gap: 12px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-bottom: 8px;
 }
 
 .migration-grid {
@@ -360,6 +408,35 @@
   justify-content: flex-end;
 }
 
+.migration-log-title {
+  margin-top: 8px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.migration-log {
+  margin-top: 6px;
+  max-height: 180px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px;
+  background: #0f172a;
+  color: #e2e8f0;
+  font-family: "JetBrains Mono", "Fira Code", "SFMono-Regular", Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.migration-log-empty {
+  color: #94a3b8;
+}
+
+.migration-log-line {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .migration-result {
   border: 1px solid var(--border);
   border-radius: 12px;
@@ -403,6 +480,13 @@
   border-radius: 999px;
 }
 
+.export-mysqldump {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
 .export-list {
   max-height: 260px;
   overflow-y: auto;
@@ -422,6 +506,35 @@
 
 .export-item:hover {
   background: rgba(20, 91, 255, 0.06);
+}
+
+.export-log-title {
+  margin-top: 12px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.export-log {
+  margin-top: 6px;
+  max-height: 180px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px;
+  background: #0f172a;
+  color: #e2e8f0;
+  font-family: "JetBrains Mono", "Fira Code", SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.export-log-empty {
+  color: #94a3b8;
+}
+
+.export-log-line {
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .session-bar {
@@ -540,6 +653,17 @@
   background: #ffffff;
   flex: 1;
   overflow: hidden;
+}
+
+.result-card .ant-table-thead > tr > th {
+  background: #f3f4f6;
+  border-bottom: 1px solid #d1d5db;
+  color: #111827;
+  font-weight: 600;
+}
+
+.result-card .ant-table-tbody > tr > td {
+  border-bottom: 1px solid #e5e7eb;
 }
 
 .result-tabs {
