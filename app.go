@@ -278,6 +278,13 @@ type TableMeta struct {
 	SizeBytes int64  `json:"sizeBytes"`
 }
 
+type MigrationCheckRow struct {
+	Name       string `json:"name"`
+	SourceRows int64  `json:"sourceRows"`
+	TargetRows int64  `json:"targetRows"`
+	Status     string `json:"status"`
+}
+
 type ViewMeta struct {
 	Name string `json:"name"`
 }
@@ -857,7 +864,7 @@ func (a *App) newGoMysqlDumper(cfg DBConfig, executionPath string) (*dump.Dumper
 	if err != nil {
 		return nil, err
 	}
-	d.ExtraOptions = append(d.ExtraOptions, "--extended-insert", "--verbose", "--set-gtid-purged=OFF")
+	d.ExtraOptions = append(d.ExtraOptions, "--extended-insert", "--verbose", "--set-gtid-purged=OFF", "--no-create-db")
 	d.SkipMasterData(true)
 	d.SetErrOut(&LogBridge{ctx: a.ctx, eventName: "export-log"})
 	return d, nil
@@ -1006,6 +1013,114 @@ func writeTableDataTo(w io.Writer, db *sql.DB, database string, table string, ba
 	return totalCount, nil
 }
 
+func tableExists(db *sql.DB, database string, table string) (bool, error) {
+	var cnt int
+	row := db.QueryRow(
+		`SELECT COUNT(1) FROM information_schema.tables WHERE table_schema = ? AND table_name = ?`,
+		database,
+		table,
+	)
+	if err := row.Scan(&cnt); err != nil {
+		return false, err
+	}
+	return cnt > 0, nil
+}
+
+func countRows(db *sql.DB, database string, table string) (int64, error) {
+	var cnt int64
+	row := db.QueryRow(fmt.Sprintf("SELECT COUNT(1) FROM `%s`.`%s`", database, table))
+	if err := row.Scan(&cnt); err != nil {
+		return 0, err
+	}
+	return cnt, nil
+}
+
+func showCreateTable(db *sql.DB, database string, table string) (string, error) {
+	var name string
+	var createSQL string
+	row := db.QueryRow(fmt.Sprintf("SHOW CREATE TABLE `%s`.`%s`", database, table))
+	if err := row.Scan(&name, &createSQL); err != nil {
+		return "", err
+	}
+	return createSQL, nil
+}
+
+func copyTableDataDirect(srcDB *sql.DB, sourceDB string, tgtDB *sql.DB, targetDB string, table string, batchSize int) (int64, error) {
+	rows, err := srcDB.Query(fmt.Sprintf("SELECT * FROM `%s`.`%s`", sourceDB, table))
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+
+	cols, err := rows.Columns()
+	if err != nil {
+		return 0, err
+	}
+	colList := make([]string, len(cols))
+	placeholdersOne := make([]string, len(cols))
+	for i, c := range cols {
+		colList[i] = fmt.Sprintf("`%s`", c)
+		placeholdersOne[i] = "?"
+	}
+	colSQL := strings.Join(colList, ", ")
+	oneRowPH := "(" + strings.Join(placeholdersOne, ", ") + ")"
+
+	values := make([]interface{}, len(cols))
+	valuePtrs := make([]interface{}, len(cols))
+	for i := range values {
+		valuePtrs[i] = &values[i]
+	}
+
+	var (
+		totalInserted int64
+		batchPH       []string
+		batchArgs     []interface{}
+	)
+
+	flush := func() error {
+		if len(batchPH) == 0 {
+			return nil
+		}
+		sqlText := fmt.Sprintf("INSERT INTO `%s`.`%s` (%s) VALUES %s", targetDB, table, colSQL, strings.Join(batchPH, ","))
+		if _, err := tgtDB.Exec(sqlText, batchArgs...); err != nil {
+			return err
+		}
+		totalInserted += int64(len(batchPH))
+		batchPH = batchPH[:0]
+		batchArgs = batchArgs[:0]
+		return nil
+	}
+
+	for rows.Next() {
+		if err := rows.Scan(valuePtrs...); err != nil {
+			return totalInserted, err
+		}
+		for _, v := range values {
+			switch b := v.(type) {
+			case []byte:
+				copied := make([]byte, len(b))
+				copy(copied, b)
+				batchArgs = append(batchArgs, copied)
+			default:
+				batchArgs = append(batchArgs, v)
+			}
+		}
+		batchPH = append(batchPH, oneRowPH)
+		if len(batchPH) >= batchSize {
+			if err := flush(); err != nil {
+				return totalInserted, err
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return totalInserted, err
+	}
+	if err := flush(); err != nil {
+		return totalInserted, err
+	}
+	return totalInserted, nil
+}
+
 // ExportSqlDump 使用开源库导出SQL（结构/数据/结构+数据）
 func (a *App) ExportSqlDump(cfg DBConfig, tables []string, mode string) (string, error) {
 	if a.ctx == nil {
@@ -1093,127 +1208,135 @@ func (a *App) ExportSqlDump(cfg DBConfig, tables []string, mode string) (string,
 }
 
 // SyncDatabase 同步数据库（结构/数据/结构+数据）
-func (a *App) SyncDatabase(source DBConfig, sourceDB string, target DBConfig, targetDB string, mode string, tables []string) (string, error) {
+func (a *App) SyncDatabase(source DBConfig, sourceDB string, target DBConfig, targetDB string, mode string, tables []string) ([]MigrationCheckRow, error) {
 	if sourceDB == "" || targetDB == "" {
-		return "", fmt.Errorf("源库和目标库不能为空")
-	}
-	log := func(format string, args ...interface{}) {
-		ts := time.Now().Format("15:04:05")
-		if a.ctx != nil {
-			runtime.EventsEmit(a.ctx, "migration-log", fmt.Sprintf("[%s] %s", ts, fmt.Sprintf(format, args...)))
-		}
+		return nil, fmt.Errorf("源库和目标库不能为空")
 	}
 	source.Database = sourceDB
 	target.Database = targetDB
 
-	log("开始迁移：%s -> %s", sourceDB, targetDB)
 	sourceDSN, err := buildDSN(source)
 	if err != nil {
-		log("构建源库连接失败：%v", err)
-		return "", err
+		return nil, err
 	}
 	targetDSN, err := buildDSN(target)
 	if err != nil {
-		log("构建目标库连接失败：%v", err)
-		return "", err
+		return nil, err
 	}
 	srcDB, err := sql.Open("mysql", sourceDSN)
 	if err != nil {
-		log("连接源库失败：%v", err)
-		return "", err
+		return nil, err
 	}
 	defer srcDB.Close()
 
 	tgtDB, err := sql.Open("mysql", targetDSN)
 	if err != nil {
-		log("连接目标库失败：%v", err)
-		return "", err
+		return nil, err
 	}
 	defer tgtDB.Close()
 
 	if len(tables) == 0 {
 		allTables, err := fetchAllTableNames(srcDB, sourceDB)
 		if err != nil {
-			log("读取源库表失败：%v", err)
-			return "", err
+			return nil, err
 		}
 		tables = allTables
 	}
 	if len(tables) == 0 {
-		log("源库没有可迁移的表")
-		return "源库没有可迁移的表", nil
+		return []MigrationCheckRow{}, nil
 	}
 
-	dumpFile := filepath.Join(os.TempDir(), fmt.Sprintf("dms_migration_%s_%d.sql", sourceDB, time.Now().Unix()))
-	log("生成本地文件：%s", dumpFile)
-	file, err := os.Create(dumpFile)
-	if err != nil {
-		log("创建本地文件失败：%v", err)
-		return "", err
+	// 确保目标库存在
+	if _, err := tgtDB.Exec(fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s`", targetDB)); err != nil {
+		return nil, err
 	}
-
-	if mode == "schema" || mode == "both" {
-		log("导出表结构")
-		if err := writeSchemaTo(file, srcDB, sourceDB, tables); err != nil {
-			_ = file.Close()
-			log("导出表结构失败：%v", err)
-			return "", err
-		}
-	}
-	if mode == "data" || mode == "both" {
-		log("导出表数据")
-		if mode == "both" {
-			_, _ = io.WriteString(file, "\n")
-		}
-		start := time.Now()
-		for _, table := range tables {
-			log("导出表数据：%s", table)
-			count, err := writeTableDataTo(file, srcDB, sourceDB, table, 500)
-			if err != nil {
-				_ = file.Close()
-				log("导出表数据失败：%s, %v", table, err)
-				return "", err
-			}
-			log("表 %s 数据导出完成（%d 行）", table, count)
-		}
-		log("数据导出完成，用时 %s", time.Since(start).Truncate(time.Millisecond))
-	}
-	if err := file.Close(); err != nil {
-		log("关闭本地文件失败：%v", err)
-		return "", err
-	}
-
 	_, _ = tgtDB.Exec("SET FOREIGN_KEY_CHECKS = 0")
-	_, _ = tgtDB.Exec(fmt.Sprintf("USE `%s`", targetDB))
-	dumpBytes, err := os.ReadFile(dumpFile)
-	if err != nil {
-		log("读取本地文件失败：%v", err)
-		return "", err
-	}
-	stmts := strings.Split(string(dumpBytes), ";\n")
-	log("开始执行 SQL（%d 条）", len(stmts))
-	tableName := ""
-	for idx, stmt := range stmts {
-		s := strings.TrimSpace(stmt)
-		if s == "" {
+	defer func() { _, _ = tgtDB.Exec("SET FOREIGN_KEY_CHECKS = 1") }()
+
+	var results []MigrationCheckRow
+	for _, table := range tables {
+		row := MigrationCheckRow{Name: table, SourceRows: 0, TargetRows: 0, Status: "pending"}
+
+		// 源表行数
+		if c, err := countRows(srcDB, sourceDB, table); err == nil {
+			row.SourceRows = c
+		}
+
+		// 目标表是否存在 + 行数
+		exists, err := tableExists(tgtDB, targetDB, table)
+		if err != nil {
+			row.Status = "failed: 读取目标表信息失败"
+			results = append(results, row)
 			continue
 		}
-		upper := strings.ToUpper(s)
-		if strings.HasPrefix(upper, "CREATE TABLE") || strings.HasPrefix(upper, "INSERT INTO") || strings.HasPrefix(upper, "DROP TABLE") || strings.HasPrefix(upper, "ALTER TABLE") {
-			tableName = extractTableName(s)
-			if tableName != "" {
-				log("处理表：%s", tableName)
+		if exists {
+			if c, err := countRows(tgtDB, targetDB, table); err == nil {
+				row.TargetRows = c
 			}
 		}
-		if _, err := tgtDB.Exec(s); err != nil {
-			log("执行失败（第 %d 条, 表 %s）：%v", idx+1, tableName, err)
-			return "", err
-		}
-	}
-	_, _ = tgtDB.Exec("SET FOREIGN_KEY_CHECKS = 1")
 
-	log("迁移完成")
-	return "同步完成", nil
+		// 结构迁移
+		if mode == "schema" || mode == "both" || (mode == "data" && !exists) {
+			if exists && (mode == "schema" || mode == "both") {
+				row.Status = "failed: 目标已存在同名表"
+				results = append(results, row)
+				continue
+			}
+			createSQL, err := showCreateTable(srcDB, sourceDB, table)
+			if err != nil {
+				row.Status = "failed: 获取源表结构失败"
+				results = append(results, row)
+				continue
+			}
+			if _, err := tgtDB.Exec(fmt.Sprintf("USE `%s`", targetDB)); err != nil {
+				row.Status = "failed: 切换目标库失败"
+				results = append(results, row)
+				continue
+			}
+			if _, err := tgtDB.Exec(createSQL); err != nil {
+				row.Status = "failed: 创建目标表失败"
+				results = append(results, row)
+				continue
+			}
+			exists = true
+		}
+
+		// 数据迁移
+		if mode == "data" || mode == "both" {
+			if !exists {
+				row.Status = "failed: 目标不存在表结构"
+				results = append(results, row)
+				continue
+			}
+			if row.TargetRows > 0 {
+				row.Status = "failed: 目标表已有数据"
+				results = append(results, row)
+				continue
+			}
+
+			// 分批拷贝数据
+			if _, err := tgtDB.Exec(fmt.Sprintf("USE `%s`", targetDB)); err != nil {
+				row.Status = "failed: 切换目标库失败"
+				results = append(results, row)
+				continue
+			}
+
+			_, err := copyTableDataDirect(srcDB, sourceDB, tgtDB, targetDB, table, 200)
+			if err != nil {
+				row.Status = "failed: 写入数据失败"
+				results = append(results, row)
+				continue
+			}
+			if c, err := countRows(tgtDB, targetDB, table); err == nil {
+				row.TargetRows = c
+			}
+		}
+
+		row.Status = "success"
+		results = append(results, row)
+	}
+
+	return results, nil
 }
 
 func extractTableName(stmt string) string {

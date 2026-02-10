@@ -44,7 +44,7 @@ export function SaveExcelFromJSON(arg1:string,arg2:string):Promise<string>;
 
 export function SaveTextFile(arg1:string,arg2:string):Promise<string>;
 
-export function SyncDatabase(arg1:main.DBConfig,arg2:string,arg3:main.DBConfig,arg4:string,arg5:string,arg6:Array<string>):Promise<string>;
+export function SyncDatabase(arg1:main.DBConfig,arg2:string,arg3:main.DBConfig,arg4:string,arg5:string,arg6:Array<string>):Promise<Array<main.MigrationCheckRow>>;
 
 export function TestConnection(arg1:string):Promise<void>;
 

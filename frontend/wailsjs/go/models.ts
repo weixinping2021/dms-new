@@ -50,6 +50,24 @@ export namespace main {
 	        this.database = source["database"];
 	    }
 	}
+	export class MigrationCheckRow {
+	    name: string;
+	    sourceRows: number;
+	    targetRows: number;
+	    status: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new MigrationCheckRow(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.sourceRows = source["sourceRows"];
+	        this.targetRows = source["targetRows"];
+	        this.status = source["status"];
+	    }
+	}
 	export class QueryResult {
 	    columns: string[];
 	    rows: any[];

@@ -6,7 +6,7 @@ import './App.css';
 import {
   Layout, Menu, Button, Modal, Form, Input,
   Table, Card, Space, Typography, message,
-  Divider, Tooltip, Tabs, Dropdown, InputNumber, Select, Switch,
+  Divider, Tooltip, Tabs, InputNumber, Select, Switch,
   Radio
 } from 'antd';
 import {
@@ -45,7 +45,6 @@ import {
   SaveAppSettings,
   SyncDatabase
 } from '../wailsjs/go/main/App';
-
 const { Sider, Content, Header } = Layout;
 const { Text, Title } = Typography;
 
@@ -150,11 +149,10 @@ const App: React.FC = () => {
   const [migrationCheck, setMigrationCheck] = useState<Array<{ name: string; sourceRows: number; targetRows: number; status: string }>>([]);
   const [migrationSources, setMigrationSources] = useState<Record<string, string[]>>({});
   const [migrationTargets, setMigrationTargets] = useState<Record<string, string[]>>({});
-  const [migrationLogs, setMigrationLogs] = useState<string[]>([]);
-  const migrationLogRef = useRef<HTMLDivElement | null>(null);
   const [sessionAuto, setSessionAuto] = useState(false);
   const [sessionInterval, setSessionInterval] = useState(5);
   const [selectedSessionIds, setSelectedSessionIds] = useState<number[]>([]);
+  const [dbFilter, setDbFilter] = useState('');
 
   const [queryTabs, setQueryTabs] = useState<QueryTab[]>([]);
   const [activeTabKey, setActiveTabKey] = useState<string>('');
@@ -722,8 +720,14 @@ const App: React.FC = () => {
         message.error('检测不通过：目标库存在冲突表/数据');
         return;
       }
-      await SyncDatabase(sourceConn, migrationSourceDb, targetConn, migrationTargetDb, migrationMode, migrationSourceTables);
-      message.success('同步完成');
+      const resultRows = await SyncDatabase(sourceConn, migrationSourceDb, targetConn, migrationTargetDb, migrationMode, migrationSourceTables);
+      setMigrationCheck(resultRows as any);
+      const failed = (resultRows || []).filter((r: any) => String(r.status || '').startsWith('failed'));
+      if (failed.length > 0) {
+        message.warning(`同步完成（失败 ${failed.length} 张表）`);
+      } else {
+        message.success('同步完成');
+      }
     } catch (err) {
       message.error('同步失败: ' + err);
     } finally {
@@ -803,19 +807,7 @@ const App: React.FC = () => {
     return () => clearInterval(timer);
   }, [sessionAuto, sessionInterval, activeTab?.key, activeTab?.kind, activeTab?.connId]);
 
-  useEffect(() => {
-    if (activeTab?.kind !== 'migration') return;
-    setMigrationLogs([]);
-    const off = EventsOn('migration-log', (msg: string) => {
-      setMigrationLogs(prev => [...prev, msg]);
-    });
-    return () => off();
-  }, [activeTab?.kind, activeTab?.key]);
-
-  useEffect(() => {
-    if (!migrationLogRef.current) return;
-    migrationLogRef.current.scrollTop = migrationLogRef.current.scrollHeight;
-  }, [migrationLogs.length]);
+  // 迁移页不再实时打印日志到前端
 
   useEffect(() => {
     if (!isExportOpen) return;
@@ -1113,114 +1105,159 @@ const App: React.FC = () => {
     }
   };
 
-  const connectionMenuItems = (conn: DBConfig) => [
-    { key: 'connect', label: '连接', icon: <DatabaseOutlined />, onClick: () => handleConnect(conn) },
-    { key: 'sessions', label: '会话管理', icon: <DesktopOutlined />, onClick: () => openSessionTab() },
-    { key: 'edit', label: '编辑', icon: <EditOutlined />, onClick: () => openEditModal(conn) },
-    { key: 'delete', label: '删除', icon: <DeleteOutlined />, onClick: () => handleDeleteConnection(conn) }
-  ];
+  type TreeContextMenu =
+    | { type: 'conn'; conn: DBConfig }
+    | { type: 'db'; conn: DBConfig; db: string }
+    | { type: 'table'; conn: DBConfig; db: string; table: TableMeta }
+    | { type: 'view'; conn: DBConfig; db: string; view: ViewMeta };
+
+  const [treeContextMenu, setTreeContextMenu] = useState<{ x: number; y: number; menu: TreeContextMenu } | null>(null);
+
+  const openTreeContextMenu = (e: React.MouseEvent, menu: TreeContextMenu) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setTreeContextMenu({
+      x: e.clientX,
+      y: e.clientY,
+      menu
+    });
+  };
+
+  const closeTreeContextMenu = () => setTreeContextMenu(null);
 
   const renderConnLabel = (conn: DBConfig) => (
-    <Dropdown menu={{ items: connectionMenuItems(conn) }} trigger={['contextMenu']}>
-      <div
-        className="tree-node"
-        onClick={() => handleConnect(conn)}
-        onDoubleClick={() => handleConnect(conn)}
-      >
-        <span className={`status-dot status-${connStatus[conn.id] || 'disconnected'}`} />
-        <span className="tree-label">{conn.name}</span>
-      </div>
-    </Dropdown>
+    <div
+      className="tree-node"
+      onClick={() => handleConnect(conn)}
+      onDoubleClick={() => handleConnect(conn)}
+      onContextMenu={(e) => openTreeContextMenu(e, { type: 'conn', conn })}
+    >
+      <span className={`status-dot status-${connStatus[conn.id] || 'disconnected'}`} />
+      <span className="tree-label">{conn.name}</span>
+    </div>
   );
 
   const renderDbLabel = (conn: DBConfig, db: string) => (
-    <Dropdown
-      menu={{
-        items: [
-          { key: 'use', label: '切换到该库', icon: <DatabaseOutlined />, onClick: () => handleSelectDb(conn, db) },
-          { key: 'refresh', label: '刷新对象', icon: <ReloadOutlined />, onClick: () => handleSelectDb(conn, db) },
-          { key: 'export', label: '导出SQL', icon: <FileTextOutlined />, onClick: () => openExportModal(conn, db) }
-        ]
-      }}
-      trigger={['contextMenu']}
+    <div
+      className="tree-node"
+      onContextMenu={(e) => openTreeContextMenu(e, { type: 'db', conn, db })}
     >
-      <div
-        className="tree-node"
-      >
-        <span className="tree-label">{db}</span>
-      </div>
-    </Dropdown>
+      <span className="tree-label">{db}</span>
+    </div>
   );
 
   const renderTableLabel = (conn: DBConfig, db: string, table: TableMeta) => (
-    <Dropdown
-      menu={{
-        items: [
-          {
-            key: 'data',
-            label: '查看数据',
-            icon: <TableOutlined />
-          },
-          {
-            key: 'schema',
-            label: '表结构',
-            icon: <FileTextOutlined />
-          }
-        ],
-        onClick: ({ key }) => {
-          if (!activeConn) return;
-          if (key === 'data') {
-            addQueryTabForDb(conn, db, `SELECT * FROM \`${table.name}\` LIMIT 200;`, `Data - ${table.name}`);
-          }
-          if (key === 'schema') {
-            showTableDdl(conn, db, table.name, false);
-          }
-        }
-      }}
-      trigger={['contextMenu']}
+    <div
+      className="tree-node tree-row"
+      onContextMenu={(e) => openTreeContextMenu(e, { type: 'table', conn, db, table })}
     >
-      <div className="tree-node tree-row">
-        <span className="tree-label">{table.name}</span>
-      </div>
-    </Dropdown>
+      <span className="tree-label">{table.name}</span>
+    </div>
   );
 
   const renderViewLabel = (conn: DBConfig, db: string, view: ViewMeta) => (
-    <Dropdown
-      menu={{
-        items: [
-          {
-            key: 'data',
-            label: '查看数据',
-            icon: <TableOutlined />
-          },
-          {
-            key: 'ddl',
-            label: '表结构',
-            icon: <FileTextOutlined />
+    <div
+      className="tree-node tree-row"
+      onContextMenu={(e) => openTreeContextMenu(e, { type: 'view', conn, db, view })}
+    >
+      <span className="tree-label">{view.name}</span>
+    </div>
+  );
+
+  const renderTreeContextMenu = () => {
+    if (!treeContextMenu) return null;
+    const { menu } = treeContextMenu;
+
+    const items: { key: string; label: string; icon?: React.ReactNode; onClick: () => void }[] = [];
+
+    if (menu.type === 'conn') {
+      items.push(
+        { key: 'connect', label: '连接', icon: <DatabaseOutlined />, onClick: () => handleConnect(menu.conn) },
+        { key: 'sessions', label: '会话管理', icon: <DesktopOutlined />, onClick: () => openSessionTab() },
+        { key: 'edit', label: '编辑', icon: <EditOutlined />, onClick: () => openEditModal(menu.conn) },
+        { key: 'delete', label: '删除', icon: <DeleteOutlined />, onClick: () => handleDeleteConnection(menu.conn) }
+      );
+    } else if (menu.type === 'db') {
+      items.push(
+        { key: 'use', label: '切换到该库', icon: <DatabaseOutlined />, onClick: () => handleSelectDb(menu.conn, menu.db) },
+        { key: 'refresh', label: '刷新对象', icon: <ReloadOutlined />, onClick: () => handleSelectDb(menu.conn, menu.db) },
+        { key: 'export', label: '导出SQL', icon: <FileTextOutlined />, onClick: () => openExportModal(menu.conn, menu.db) }
+      );
+    } else if (menu.type === 'table') {
+      items.push(
+        {
+          key: 'data',
+          label: '查看数据',
+          icon: <TableOutlined />,
+          onClick: () => {
+            if (!activeConn) return;
+            addQueryTabForDb(menu.conn, menu.db, `SELECT * FROM \`${menu.table.name}\` LIMIT 200;`, `Data - ${menu.table.name}`);
           }
-        ],
-        onClick: ({ key }) => {
-          if (!activeConn) return;
-          if (key === 'data') {
-            addQueryTabForDb(conn, db, `SELECT * FROM \`${view.name}\` LIMIT 200;`, `Data - ${view.name}`);
-          }
-          if (key === 'ddl') {
-            showTableDdl(conn, db, view.name, true);
+        },
+        {
+          key: 'schema',
+          label: '表结构',
+          icon: <FileTextOutlined />,
+          onClick: () => {
+            if (!activeConn) return;
+            showTableDdl(menu.conn, menu.db, menu.table.name, false);
           }
         }
-      }}
-      trigger={['contextMenu']}
-    >
-      <div className="tree-node tree-row">
-        <span className="tree-label">{view.name}</span>
+      );
+    } else if (menu.type === 'view') {
+      items.push(
+        {
+          key: 'data',
+          label: '查看数据',
+          icon: <TableOutlined />,
+          onClick: () => {
+            if (!activeConn) return;
+            addQueryTabForDb(menu.conn, menu.db, `SELECT * FROM \`${menu.view.name}\` LIMIT 200;`, `Data - ${menu.view.name}`);
+          }
+        },
+        {
+          key: 'ddl',
+          label: '表结构',
+          icon: <FileTextOutlined />,
+          onClick: () => {
+            if (!activeConn) return;
+            showTableDdl(menu.conn, menu.db, menu.view.name, true);
+          }
+        }
+      );
+    }
+
+    return (
+      <div className="tree-context-menu-mask" onClick={closeTreeContextMenu}>
+        <div
+          className="tree-context-menu"
+          style={{ left: treeContextMenu.x, top: treeContextMenu.y }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          {items.map(item => (
+            <div
+              key={item.key}
+              className="tree-context-menu-item"
+              onClick={() => {
+                item.onClick();
+                closeTreeContextMenu();
+              }}
+            >
+              {item.icon && <span className="tree-context-menu-icon">{item.icon}</span>}
+              <span className="tree-context-menu-label">{item.label}</span>
+            </div>
+          ))}
+        </div>
       </div>
-    </Dropdown>
-  );
+    );
+  };
 
   // 构造侧边栏树形菜单
   const menuItems: MenuItem[] = connections.map(conn => {
-    const dbs = dbList[conn.id] || [];
+    const allDbs = dbList[conn.id] || [];
+    const dbs = dbFilter
+      ? allDbs.filter(name => name.toLowerCase().includes(dbFilter.toLowerCase()))
+      : allDbs;
     return {
       key: conn.id,
       label: renderConnLabel(conn),
@@ -1332,6 +1369,7 @@ const App: React.FC = () => {
 
   return (
     <Layout className="app-shell">
+      {renderTreeContextMenu()}
       {/* 顶部简单的状态栏 */}
       <Header className="app-header">
         <div className="app-title">
@@ -1344,11 +1382,7 @@ const App: React.FC = () => {
           </div>
         </div>
         <Divider type="vertical" />
-        <Text type="secondary" className="app-status app-status-highlight">
-          {activeTab?.connId
-            ? `${connections.find(c => c.id === activeTab.connId)?.name || '未知连接'}:${activeTab.dbName || '未选库'}`
-            : '未选择连接'}
-        </Text>
+
         <div className="app-header-actions">
           <div className="header-toolbar">
             <Button size="small" icon={<DatabaseOutlined />} />
@@ -1373,6 +1407,15 @@ const App: React.FC = () => {
                 <Button type="primary" shape="circle" icon={<PlusOutlined />} onClick={openCreateModal} />
               </Tooltip>
             </div>
+          </div>
+          <div className="sider-db-search">
+            <Input
+              size="small"
+              allowClear
+              placeholder="搜索数据库"
+              value={dbFilter}
+              onChange={(e) => setDbFilter(e.target.value)}
+            />
           </div>
           <Menu
             mode="inline"
@@ -1617,7 +1660,10 @@ const App: React.FC = () => {
                           <div className="migration-section-title">迁移模式</div>
                           <Radio.Group
                             value={migrationMode}
-                            onChange={(e) => setMigrationMode(e.target.value)}
+                            onChange={(e) => {
+                              setMigrationMode(e.target.value);
+                              setMigrationCheck([]);
+                            }}
                             options={[
                               { label: '仅结构', value: 'schema' },
                               { label: '结构 + 数据', value: 'both' },
@@ -1637,6 +1683,7 @@ const App: React.FC = () => {
                                 setMigrationSourceConn(value);
                                 setMigrationSourceDb('');
                                 setMigrationSourceTables([]);
+                                setMigrationCheck([]);
                                 await loadMigrationSourceTree(value);
                               }}
                               options={connections.map(c => ({ label: c.name, value: c.id }))}
@@ -1650,6 +1697,7 @@ const App: React.FC = () => {
                               onChange={async (value) => {
                                 setMigrationTargetConn(value);
                                 setMigrationTargetDb('');
+                                setMigrationCheck([]);
                                 const list = await loadDbListFor(value, 'target');
                                 const firstDb = list && list.length > 0 ? list[0] : '';
                                 setMigrationTargetDb(firstDb);
@@ -1670,6 +1718,7 @@ const App: React.FC = () => {
                                 onChange={async (value) => {
                                   setMigrationSourceDb(value);
                                   setMigrationSourceTables([]);
+                                  setMigrationCheck([]);
                                   await loadMigrationSourceTables(migrationSourceConn || '', value);
                                 }}
                                 showSearch
@@ -1683,7 +1732,10 @@ const App: React.FC = () => {
                                 mode="multiple"
                                 placeholder="选择表（可多选）"
                                 value={migrationSourceTables}
-                                onChange={(value) => setMigrationSourceTables(value)}
+                                onChange={(value) => {
+                                  setMigrationSourceTables(value);
+                                  setMigrationCheck([]);
+                                }}
                                 showSearch
                                 optionFilterProp="label"
                                 maxTagCount={3}
@@ -1700,11 +1752,15 @@ const App: React.FC = () => {
                                   onClick={() => {
                                     const all = (tableList[migrationSourceConn]?.[migrationSourceDb] || []).map(t => t.name);
                                     setMigrationSourceTables(all);
+                                    setMigrationCheck([]);
                                   }}
                                 >
                                   全选
                                 </Button>
-                                <Button size="small" onClick={() => setMigrationSourceTables([])}>
+                                <Button size="small" onClick={() => {
+                                  setMigrationSourceTables([]);
+                                  setMigrationCheck([]);
+                                }}>
                                   清空
                                 </Button>
                               </div>
@@ -1714,7 +1770,10 @@ const App: React.FC = () => {
                               <Select
                                 placeholder="选择目标库"
                                 value={migrationTargetDb || undefined}
-                                onChange={(value) => setMigrationTargetDb(value)}
+                                onChange={(value) => {
+                                  setMigrationTargetDb(value);
+                                  setMigrationCheck([]);
+                                }}
                                 showSearch
                                 optionFilterProp="label"
                                 options={(migrationTargets[migrationTargetConn] || []).map(d => ({ label: d, value: d }))}
@@ -1732,17 +1791,6 @@ const App: React.FC = () => {
                               开始同步
                             </Button>
                           </Space>
-                        </div>
-
-                        <div className="migration-log-title">迁移日志</div>
-                        <div className="migration-log" ref={migrationLogRef}>
-                          {migrationLogs.length === 0 ? (
-                            <div className="migration-log-empty">等待开始迁移...</div>
-                          ) : (
-                            migrationLogs.map((line, idx) => (
-                              <div key={`${line}-${idx}`} className="migration-log-line">{line}</div>
-                            ))
-                          )}
                         </div>
 
                         <div className="migration-result">
