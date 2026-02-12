@@ -363,18 +363,19 @@
 }
 
 .sql-card {
-  flex: 1;
-  min-height: 0;
+  flex: 0 0 auto;
   display: flex;
   flex-direction: column;
-  border-bottom: 1px solid var(--navicat-border-light);
+  border-bottom: none;
+  background: var(--navicat-panel);
 }
 
 .sql-card .ant-card-head {
   background: var(--navicat-toolbar);
   border-bottom: 1px solid var(--navicat-border-light);
-  padding: 0 12px;
+  padding: 8px 12px;
   min-height: 40px;
+  flex-shrink: 0;
 }
 
 .sql-card .ant-card-body {
@@ -383,6 +384,7 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 
 .sql-card .ant-tabs {
@@ -396,7 +398,21 @@
 .sql-card .ant-tabs-content-holder {
   flex: 1;
   min-height: 0;
-  overflow: auto;
+  overflow: hidden;
+}
+
+.sql-card .ant-tabs-content {
+  height: 100%;
+}
+
+.sql-card .ant-tabs-tabpane {
+  height: 100%;
+}
+
+.sql-card .ant-tabs-tabpane > div {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
 }
 
 .sql-card .ant-tabs-nav {
@@ -460,6 +476,8 @@
   margin: 0;
   height: 100%;
   overflow: auto;
+  flex: 1;
+  min-height: 0;
 }
 
 .ddl-content {
@@ -475,10 +493,24 @@
 /* ==================== 会话管理 ==================== */
 
 .session-page {
-  padding: 12px;
-  max-height: 100%;
+  padding: 0;
+  height: 100%;
   overflow-y: auto;
   background: var(--navicat-bg);
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.session-page > .ant-table {
+  flex: 1;
+  min-height: 0;
+  margin: 0 12px;
+}
+
+.session-page > .ant-table .ant-table-container {
+  height: 100%;
 }
 
 .session-bar {
@@ -490,8 +522,9 @@
   border: 1px solid var(--navicat-border-light);
   border-radius: 2px;
   background: var(--navicat-panel);
-  margin-bottom: 12px;
+  margin: 12px 12px 0 12px;
   box-shadow: var(--navicat-shadow);
+  flex-shrink: 0;
 }
 
 .session-left {
@@ -524,8 +557,9 @@
   display: grid;
   grid-template-columns: auto 1fr;
   gap: 12px;
-  margin-bottom: 12px;
+  margin: 0 12px 12px 12px;
   align-items: center;
+  flex-shrink: 0;
 }
 
 .session-actions {
@@ -555,7 +589,8 @@
   display: grid;
   grid-template-columns: 1fr 1fr 1fr;
   gap: 12px;
-  margin-top: 12px;
+  margin: 12px 12px 0 12px;
+  flex-shrink: 0;
 }
 
 .stats-table {
@@ -589,9 +624,11 @@
   flex-direction: column;
   gap: 12px;
   padding: 12px;
-  max-height: 100%;
+  height: 100%;
   overflow-y: auto;
   background: var(--navicat-bg);
+  flex: 1;
+  min-height: 0;
 }
 
 .migration-grid {
@@ -743,6 +780,7 @@
 .result-card {
   background: var(--navicat-panel);
   flex: 1;
+  min-height: 0;
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -751,6 +789,8 @@
 
 .result-tabs {
   height: 100%;
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
 }
@@ -759,6 +799,7 @@
   background: var(--navicat-toolbar);
   padding: 0 8px;
   margin: 0;
+  flex-shrink: 0;
 }
 
 .result-tabs .ant-tabs-tab {
@@ -781,7 +822,16 @@
 
 .result-tabs .ant-tabs-content-holder {
   flex: 1;
+  min-height: 0;
   overflow: hidden;
+}
+
+.result-tabs .ant-tabs-content {
+  height: 100%;
+}
+
+.result-tabs .ant-tabs-tabpane {
+  height: 100%;
 }
 
 .result-tabs-bar {
@@ -812,6 +862,14 @@
   box-sizing: border-box;
   overflow: auto;
   background: var(--navicat-panel);
+  flex: 1;
+  min-height: 0;
+}
+
+.result-cell {
+  display: inline-block;
+  max-width: 100%;
+  cursor: copy;
 }
 
 .result-table-wrap::-webkit-scrollbar {
@@ -838,44 +896,70 @@
   border-radius: 0;
   overflow: hidden;
   border: none;
-  border-bottom: 1px solid var(--navicat-border-light);
   background: var(--navicat-panel);
   box-shadow: none;
   margin: 0;
-}
-
-.sql-editor-wrapper:focus-within {
-  border-color: var(--navicat-border-light);
-  box-shadow: none;
+  flex: 1;
+  height: 100%;
+  min-height: 0;
+  display: flex;
 }
 
 .sql-editor-wrapper .monaco-editor {
   background: var(--navicat-panel);
+  flex: 1;
 }
 
-.sql-actions {
-  margin: 0;
+.sql-editor-row {
   display: flex;
-  gap: 4px;
-  padding: 8px 12px;
-  background: var(--navicat-toolbar);
-  border-bottom: 1px solid var(--navicat-border-light);
+  gap: 8px;
+  padding: 0;
+  height: 100%;
+  width: 100%;
 }
 
-.sql-actions .ant-btn {
+.sql-editor-row > div:first-child {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+}
+
+.sql-editor-row > div:nth-child(2) {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.sql-editor-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 12px;
+  flex-shrink: 0;
+}
+
+.sql-editor-actions .ant-btn {
   height: 28px;
   padding: 0 12px;
   font-size: 12px;
   border-radius: 2px;
 }
 
-.sql-actions .ant-btn-primary {
+.sql-editor-actions .ant-btn-primary {
   box-shadow: none;
 }
 
-.sql-actions .ant-btn-primary:hover {
+.sql-editor-actions .ant-btn-primary:hover {
   transform: none;
   box-shadow: none;
+}
+
+.sql-resizer {
+  height: 4px;
+  cursor: row-resize;
+  background: transparent;
+  border-top: 1px solid var(--navicat-border-light);
+  border-bottom: none;
 }
 
 /* ==================== 空状态 ==================== */
@@ -1167,4 +1251,3 @@
     grid-template-columns: 1fr;
   }
 }
-

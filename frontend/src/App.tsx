@@ -13,7 +13,7 @@ import {
   PlusOutlined, DatabaseOutlined, ConsoleSqlOutlined,
   ReloadOutlined, DesktopOutlined,
   TableOutlined, EditOutlined, DeleteOutlined,
-  ExclamationCircleOutlined,
+  ExclamationCircleOutlined, ThunderboltOutlined, CaretRightOutlined,
   FileTextOutlined
 } from '@ant-design/icons';
 import mysqlLogo from './assets/images/mysql.svg';
@@ -156,6 +156,9 @@ const App: React.FC = () => {
 
   const [queryTabs, setQueryTabs] = useState<QueryTab[]>([]);
   const [activeTabKey, setActiveTabKey] = useState<string>('');
+  const [sqlPaneHeight, setSqlPaneHeight] = useState<number>(380);
+  const isResizingRef = useRef(false);
+  const workspaceRef = useRef<HTMLDivElement | null>(null);
   const tabSeq = useRef(1);
   const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null);
   const monacoRef = useRef<typeof Monaco | null>(null);
@@ -234,9 +237,13 @@ const App: React.FC = () => {
 
   const removeTab = (targetKey: string) => {
     setQueryTabs(prev => {
-      if (prev.length === 1) return prev;
       const next = prev.filter(tab => tab.key !== targetKey);
-      if (activeTabKey === targetKey && next.length > 0) {
+      if (next.length === 0) {
+        const fallback = createTab();
+        setActiveTabKey(fallback.key);
+        return [fallback];
+      }
+      if (activeTabKey === targetKey) {
         setActiveTabKey(next[next.length - 1].key);
       }
       return next;
@@ -513,8 +520,25 @@ const App: React.FC = () => {
     }
   };
 
-  const openExportModal = (conn: DBConfig, dbName: string) => {
-    const tables = tableList[conn.id]?.[dbName] || [];
+  const openExportModal = async (conn: DBConfig, dbName: string) => {
+    let tables = tableList[conn.id]?.[dbName] || [];
+    if (tables.length === 0) {
+      try {
+        await ConnectDBConfig(conn);
+        await ExecuteQuery(`USE \`${dbName}\``);
+        const fetched = await GetTables(dbName);
+        tables = fetched || [];
+        setTableList(prev => ({
+          ...prev,
+          [conn.id]: {
+            ...(prev[conn.id] || {}),
+            [dbName]: tables
+          }
+        }));
+      } catch (err) {
+        message.error('加载表失败: ' + err);
+      }
+    }
     setExportDb({ conn, db: dbName });
     setExportTables(tables.map(t => t.name));
     setExportSearch('');
@@ -574,6 +598,11 @@ const App: React.FC = () => {
   };
 
   const openMigrationTab = () => {
+    const existing = queryTabs.find(tab => tab.kind === 'migration');
+    if (existing) {
+      setActiveTabKey(existing.key);
+      return;
+    }
     const key = `migration-${Date.now()}`;
     const next: QueryTab = {
       key,
@@ -601,7 +630,10 @@ const App: React.FC = () => {
     setMigrationTargetDb('');
     setMigrationMode('both');
     setMigrationCheck([]);
-    setQueryTabs(prev => [...prev, next]);
+    setQueryTabs(prev => {
+      const filtered = prev.filter(tab => !(tab.kind === 'query' && !tab.sql.trim() && (!tab.results || tab.results.length === 0)));
+      return [...filtered, next];
+    });
     setActiveTabKey(key);
   };
 
@@ -823,6 +855,27 @@ const App: React.FC = () => {
     exportLogRef.current.scrollTop = exportLogRef.current.scrollHeight;
   }, [exportLogs.length]);
 
+  useEffect(() => {
+    const handleMove = (e: MouseEvent) => {
+      if (!isResizingRef.current) return;
+      if (!workspaceRef.current) return;
+      const rect = workspaceRef.current.getBoundingClientRect();
+      const minSql = 200;
+      const minResult = 100;
+      const next = Math.max(minSql, Math.min(e.clientY - rect.top, rect.height - minResult));
+      setSqlPaneHeight(next);
+    };
+    const handleUp = () => {
+      isResizingRef.current = false;
+    };
+    window.addEventListener('mousemove', handleMove);
+    window.addEventListener('mouseup', handleUp);
+    return () => {
+      window.removeEventListener('mousemove', handleMove);
+      window.removeEventListener('mouseup', handleUp);
+    };
+  }, []);
+
   const handleExportSql = async () => {
     if (!exportDb) return;
     if (exportTables.length === 0) {
@@ -950,6 +1003,26 @@ const App: React.FC = () => {
     }
   };
 
+  const runSelectedSql = async (tabKey: string) => {
+    const editor = editorRef.current;
+    if (!editor) {
+      await executeTabSql(tabKey);
+      return;
+    }
+    const selection = editor.getSelection();
+    const model = editor.getModel();
+    if (!selection || !model || selection.isEmpty()) {
+      await executeTabSql(tabKey);
+      return;
+    }
+    const text = model.getValueInRange(selection).trim();
+    if (!text) {
+      await executeTabSql(tabKey);
+      return;
+    }
+    await runSqlText(tabKey, text);
+  };
+
   const resetSql = (tabKey: string) => {
     updateTab(tabKey, { sql: '' });
   };
@@ -1056,6 +1129,35 @@ const App: React.FC = () => {
     setQueryTabs(prev => [...prev, next]);
     setActiveTabKey(next.key);
     return next.key;
+  };
+
+  const truncateCellText = (value: any, maxLen: number) => {
+    if (value === null || value === undefined) return '';
+    const text = typeof value === 'string' ? value : String(value);
+    if (text.length <= maxLen) return text;
+    return text.slice(0, maxLen) + '...';
+  };
+
+  const copyCellText = async (value: any) => {
+    const text = value === null || value === undefined ? '' : String(value);
+    try {
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textarea);
+      }
+      message.success('已复制完整内容');
+    } catch (err) {
+      message.error('复制失败');
+    }
   };
 
   const addDdlTab = (title: string, content: string) => {
@@ -1262,11 +1364,8 @@ const App: React.FC = () => {
       key: conn.id,
       label: renderConnLabel(conn),
       icon: <img src={mysqlLogo} alt="MySQL" style={{ width: 16, height: 16 }} />,
-      children: dbs.length > 0 ? [{
-        key: `${conn.id}-db-group`,
-        label: 'Databases',
-        icon: <DatabaseOutlined style={{ color: '#faad14' }} />,
-        children: dbs.map(db => {
+      children: dbs.length > 0
+        ? dbs.map(db => {
           const tables = tableList[conn.id]?.[db] || [];
           const views = viewList[conn.id]?.[db] || [];
           return {
@@ -1297,7 +1396,7 @@ const App: React.FC = () => {
             ]
           };
         })
-      }] : [{ key: `${conn.id}-load`, label: '双击连接加载库...', disabled: true }]
+        : [{ key: `${conn.id}-load`, label: '双击连接加载库...', disabled: true }]
     };
   });
 
@@ -1451,11 +1550,14 @@ const App: React.FC = () => {
         {/* 右侧主工作区 */}
         <Content className="app-content">
           {showWorkspace ? (
-            <div className="workspace">
+            <div className="workspace" ref={workspaceRef}>
               {/* SQL 输入区 */}
               <Card
                 className="sql-card"
                 size="small"
+                style={activeTab?.kind === 'migration'
+                  ? { flex: 1, minHeight: 0 }
+                  : { height: sqlPaneHeight, minHeight: 220 }}
                 title={
                   <div className="sql-card-title">
                     <span>
@@ -1812,11 +1914,31 @@ const App: React.FC = () => {
                       </div>
                     ) : (
                       <div>
-                        <div className="sql-editor-wrapper">
-                          <Editor
-                            height={160}
-                            language="sql"
-                            value={tab.sql}
+                        <div className="sql-editor-row">
+                          <div className="sql-editor-actions">
+                            <Tooltip title="执行选中 SQL（未选中则执行全部）">
+                              <Button
+                                type="primary"
+                                shape="circle"
+                                icon={<CaretRightOutlined />}
+                                onClick={() => runSelectedSql(tab.key)}
+                                loading={tab.loading}
+                              />
+                            </Tooltip>
+                            <Tooltip title="执行全部 SQL">
+                              <Button
+                                shape="circle"
+                                icon={<ThunderboltOutlined />}
+                                onClick={() => executeTabSql(tab.key)}
+                                loading={tab.loading}
+                              />
+                            </Tooltip>
+                          </div>
+                          <div className="sql-editor-wrapper">
+                            <Editor
+                              height="100%"
+                              language="sql"
+                              value={tab.sql}
                             onChange={value => updateTab(tab.key, { sql: value || '' })}
                             onMount={(editor, monaco) => {
                               editorRef.current = editor;
@@ -1884,34 +2006,49 @@ const App: React.FC = () => {
                               scrollBeyondLastLine: false,
                               wordWrap: 'on'
                             }}
-                          />
+                            />
+                          </div>
                         </div>
-                        <Space className="sql-actions">
-                          <Button type="primary" icon={<ConsoleSqlOutlined />} onClick={() => executeTabSql(tab.key)} loading={tab.loading}>
-                            执行
-                          </Button>
-                          <Button icon={<ReloadOutlined />} onClick={() => resetSql(tab.key)}>
-                            重置
-                          </Button>
-                        </Space>
                       </div>
                     )
                   }))}
                 />
               </Card>
 
+              {/* 拖拽分隔条 */}
+              {activeTab?.kind !== 'ddl' && activeTab?.kind !== 'session' && activeTab?.kind !== 'migration' && (activeTab?.results || []).length > 0 && (
+                <div
+                  className="sql-resizer"
+                  onMouseDown={() => {
+                    isResizingRef.current = true;
+                  }}
+                />
+              )}
+
               {/* 结果展示区 */}
-              {activeTab?.kind !== 'ddl' && activeTab?.kind !== 'session' && activeTab?.kind !== 'migration' && (
+              {activeTab?.kind !== 'ddl' && activeTab?.kind !== 'session' && activeTab?.kind !== 'migration' && (activeTab?.results || []).length > 0 && (
                 <Card
                   className="result-card"
                   size="small"
                   bodyStyle={{ padding: 0, height: '100%', overflow: 'hidden' }}
                 >
                   <Tabs
-                    type="card"
+                    type="editable-card"
                     activeKey={activeTab?.activeResultKey}
                     onChange={(key) => updateActiveTab({ activeResultKey: key })}
                     className="result-tabs"
+                    hideAdd
+                    onEdit={(targetKey, action) => {
+                      if (action !== 'remove') return;
+                      if (!activeTab) return;
+                      const results = activeTab.results || [];
+                      const nextResults = results.filter(r => r.key !== targetKey);
+                      let nextActive = activeTab.activeResultKey;
+                      if (nextActive === targetKey) {
+                        nextActive = nextResults.length ? nextResults[nextResults.length - 1].key : undefined;
+                      }
+                      updateActiveTab({ results: nextResults, activeResultKey: nextActive });
+                    }}
                     renderTabBar={(props, DefaultTabBar) => (
                       <div className="result-tabs-bar">
                         <DefaultTabBar {...props} />
@@ -1936,13 +2073,36 @@ const App: React.FC = () => {
                         <div className="result-table-wrap">
                           <Table
                             dataSource={result.data || []}
-                            columns={result.columns || []}
+                            columns={(result.columns || []).map((col: any) => {
+                              const width = col.width || 220;
+                              if (col.render) {
+                                return { ...col, ellipsis: true, width };
+                              }
+                              return {
+                                ...col,
+                                ellipsis: true,
+                                width,
+                                render: (value: any) => {
+                                  const text = truncateCellText(value, 80);
+                                  return (
+                                    <span
+                                      title="双击复制完整内容"
+                                      className="result-cell"
+                                      onDoubleClick={() => copyCellText(value)}
+                                    >
+                                      {text}
+                                    </span>
+                                  );
+                                }
+                              };
+                            })}
                             size="small"
                             bordered
                             sticky
                             rowKey={(record, index) => record?.id ?? record?._id ?? index ?? Math.random()}
                             pagination={{ defaultPageSize: 10, showSizeChanger: true }}
-                            scroll={{ x: 'max-content', y: 360 }}
+                            scroll={{ x: 'max-content' }}
+                            tableLayout="fixed"
                           />
                         </div>
                       )
