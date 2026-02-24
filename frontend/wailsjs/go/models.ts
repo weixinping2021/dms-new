@@ -29,6 +29,7 @@ export namespace main {
 	export class DBConfig {
 	    id: string;
 	    name: string;
+	    type: string;
 	    host: string;
 	    port: number;
 	    user: string;
@@ -43,6 +44,7 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
 	        this.name = source["name"];
+	        this.type = source["type"];
 	        this.host = source["host"];
 	        this.port = source["port"];
 	        this.user = source["user"];

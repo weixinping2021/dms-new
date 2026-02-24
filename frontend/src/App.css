@@ -123,6 +123,24 @@
   overflow-x: hidden;
 }
 
+.app-main-layout {
+  min-height: 0;
+}
+
+.sider-resizer {
+  width: 6px;
+  cursor: col-resize;
+  background: transparent;
+  border-right: 1px solid var(--navicat-border-light);
+  border-left: 1px solid transparent;
+  flex: 0 0 6px;
+}
+
+.sider-resizer:hover {
+  background: var(--navicat-blue-light);
+  border-right-color: #91d5ff;
+}
+
 /* 左侧树右键菜单 */
 .tree-context-menu-mask {
   position: fixed;
@@ -283,9 +301,9 @@
 }
 
 .tree-label {
-  max-width: 200px;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  max-width: none;
+  overflow: visible;
+  text-overflow: clip;
   white-space: nowrap;
   font-size: 12px;
   color: var(--navicat-text);
@@ -798,8 +816,13 @@
 .result-tabs .ant-tabs-nav {
   background: var(--navicat-toolbar);
   padding: 0 8px;
-  margin: 0;
+  margin: 0 !important;
   flex-shrink: 0;
+}
+
+.result-tabs .ant-tabs-top > .ant-tabs-nav,
+.result-tabs .ant-tabs-top > div > .ant-tabs-nav {
+  margin-bottom: 0 !important;
 }
 
 .result-tabs .ant-tabs-tab {
@@ -860,7 +883,7 @@
   height: 100%;
   padding: 0;
   box-sizing: border-box;
-  overflow: auto;
+  overflow: hidden;
   background: var(--navicat-panel);
   flex: 1;
   min-height: 0;

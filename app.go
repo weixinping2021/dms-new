@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -21,19 +22,21 @@ import (
 	"github.com/go-mysql-org/go-mysql/dump"
 	_ "github.com/go-sql-driver/mysql"
 	mysqlDriver "github.com/go-sql-driver/mysql"
+	_ "github.com/sijms/go-ora/v2"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 	"github.com/xuri/excelize/v2"
 )
 
 // App struct
 type App struct {
-	ctx context.Context
-	db  *sql.DB
+	ctx           context.Context
+	db            *sql.DB
+	currentDBType string
 }
 
 // NewApp creates a new App application struct
 func NewApp() *App {
-	return &App{}
+	return &App{currentDBType: "mysql"}
 }
 
 // startup is called when the app starts. The context is saved
@@ -60,12 +63,16 @@ func (l *LogBridge) Write(p []byte) (n int, err error) {
 
 // ConnectDB 连接数据库
 func (a *App) ConnectDB(dsn string) error {
+	return a.connectByDriver("mysql", dsn)
+}
+
+func (a *App) connectByDriver(driver string, dsn string) error {
 	// 如果已有连接，先关闭
 	if a.db != nil {
 		a.db.Close()
 	}
 
-	db, err := sql.Open("mysql", dsn)
+	db, err := sql.Open(driver, dsn)
 	if err != nil {
 		return fmt.Errorf("打开数据库失败: %v", err)
 	}
@@ -77,16 +84,17 @@ func (a *App) ConnectDB(dsn string) error {
 	}
 
 	a.db = db
+	a.currentDBType = normalizeDBType(driver)
 	return nil
 }
 
 // ConnectDBConfig 使用配置连接数据库（避免特殊字符问题）
 func (a *App) ConnectDBConfig(cfg DBConfig) error {
-	dsn, err := buildDSN(cfg)
+	driver, dsn, err := buildDriverAndDSN(cfg)
 	if err != nil {
 		return err
 	}
-	return a.ConnectDB(dsn)
+	return a.connectByDriver(driver, dsn)
 }
 
 // TestConnection 测试连接（不保留连接）
@@ -104,11 +112,19 @@ func (a *App) TestConnection(dsn string) error {
 
 // TestConnectionConfig 使用配置测试连接（避免特殊字符问题）
 func (a *App) TestConnectionConfig(cfg DBConfig) error {
-	dsn, err := buildDSN(cfg)
+	driver, dsn, err := buildDriverAndDSN(cfg)
 	if err != nil {
 		return err
 	}
-	return a.TestConnection(dsn)
+	db, err := sql.Open(driver, dsn)
+	if err != nil {
+		return fmt.Errorf("打开数据库失败: %v", err)
+	}
+	defer db.Close()
+	if err := db.Ping(); err != nil {
+		return fmt.Errorf("无法连接到数据库: %v", err)
+	}
+	return nil
 }
 
 // ExecuteQuery 执行 SQL 并返回结果
@@ -210,6 +226,9 @@ func (a *App) ExecuteQueryWithColumns(query string) (QueryResult, error) {
 
 // GetProcessList 获取会话列表
 func (a *App) GetProcessList() ([]map[string]interface{}, error) {
+	if a.currentDBType != "mysql" {
+		return nil, fmt.Errorf("当前连接类型暂不支持会话列表")
+	}
 	if a.db == nil {
 		return nil, fmt.Errorf("数据库未连接")
 	}
@@ -251,6 +270,9 @@ func (a *App) GetProcessList() ([]map[string]interface{}, error) {
 
 // KillProcess 终止会话
 func (a *App) KillProcess(id int64) error {
+	if a.currentDBType != "mysql" {
+		return fmt.Errorf("当前连接类型暂不支持终止会话")
+	}
 	if a.db == nil {
 		return fmt.Errorf("数据库未连接")
 	}
@@ -261,6 +283,7 @@ func (a *App) KillProcess(id int64) error {
 type DBConfig struct {
 	ID       string `json:"id"`
 	Name     string `json:"name"`
+	Type     string `json:"type"`
 	Host     string `json:"host"`
 	Port     int    `json:"port"`
 	User     string `json:"user"`
@@ -338,6 +361,9 @@ func loadSavedConfigs() error {
 	if err := json.Unmarshal(data, &list); err != nil {
 		return err
 	}
+	for i := range list {
+		list[i].Type = normalizeDBType(list[i].Type)
+	}
 	savedConfigs = list
 	return nil
 }
@@ -414,6 +440,7 @@ func (a *App) SaveConnection(cfg DBConfig) error {
 	if cfg.Name == "" || cfg.Host == "" || cfg.Port == 0 || cfg.User == "" {
 		return fmt.Errorf("名称、主机、端口、用户名不能为空")
 	}
+	cfg.Type = normalizeDBType(cfg.Type)
 	for _, c := range savedConfigs {
 		if c.Name == cfg.Name {
 			return fmt.Errorf("连接名称已存在")
@@ -431,6 +458,7 @@ func (a *App) UpdateConnection(cfg DBConfig) error {
 	if cfg.Name == "" || cfg.Host == "" || cfg.Port == 0 || cfg.User == "" {
 		return fmt.Errorf("名称、主机、端口、用户名不能为空")
 	}
+	cfg.Type = normalizeDBType(cfg.Type)
 	for _, c := range savedConfigs {
 		if c.Name == cfg.Name && c.ID != cfg.ID {
 			return fmt.Errorf("连接名称已存在")
@@ -469,6 +497,24 @@ func (a *App) GetDatabases() ([]string, error) {
 	if a.db == nil {
 		return nil, fmt.Errorf("请先连接数据库")
 	}
+	if a.currentDBType == "oracle" {
+		rows, err := a.db.Query("SELECT USERNAME FROM ALL_USERS ORDER BY USERNAME")
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+
+		var dbs []string
+		for rows.Next() {
+			var schema string
+			if err := rows.Scan(&schema); err != nil {
+				return nil, err
+			}
+			dbs = append(dbs, schema)
+		}
+		return dbs, nil
+	}
+
 	rows, err := a.db.Query("SHOW DATABASES")
 	if err != nil {
 		return nil, err
@@ -488,17 +534,23 @@ func (a *App) GetDatabases() ([]string, error) {
 
 // GetDatabasesForConfig 使用配置获取数据库列表（不影响当前连接）
 func (a *App) GetDatabasesForConfig(cfg DBConfig) ([]string, error) {
-	dsn, err := buildDSN(cfg)
+	driver, dsn, err := buildDriverAndDSN(cfg)
 	if err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("mysql", dsn)
+	db, err := sql.Open(driver, dsn)
 	if err != nil {
 		return nil, err
 	}
 	defer db.Close()
 
-	rows, err := db.Query("SHOW DATABASES")
+	dbType := normalizeDBType(cfg.Type)
+	var rows *sql.Rows
+	if dbType == "oracle" {
+		rows, err = db.Query("SELECT USERNAME FROM ALL_USERS ORDER BY USERNAME")
+	} else {
+		rows, err = db.Query("SHOW DATABASES")
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -520,17 +572,46 @@ func (a *App) GetTableStats(cfg DBConfig, dbName string) ([]TableStat, error) {
 	if dbName == "" {
 		return nil, fmt.Errorf("数据库名不能为空")
 	}
-	cfg.Database = dbName
-	dsn, err := buildDSN(cfg)
+	if normalizeDBType(cfg.Type) != "oracle" {
+		cfg.Database = dbName
+	}
+	driver, dsn, err := buildDriverAndDSN(cfg)
 	if err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("mysql", dsn)
+	db, err := sql.Open(driver, dsn)
 	if err != nil {
 		return nil, err
 	}
 	defer db.Close()
 
+	if normalizeDBType(cfg.Type) == "oracle" {
+		rows, err := db.Query(
+			fmt.Sprintf(
+				"SELECT TABLE_NAME, NUM_ROWS FROM ALL_TABLES WHERE OWNER = '%s' ORDER BY TABLE_NAME",
+				escapeSQLLiteral(strings.ToUpper(dbName)),
+			),
+		)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+
+		var stats []TableStat
+		for rows.Next() {
+			var name string
+			var rowsCount sql.NullInt64
+			if err := rows.Scan(&name, &rowsCount); err != nil {
+				return nil, err
+			}
+			stats = append(stats, TableStat{
+				Name:      name,
+				Rows:      rowsCount.Int64,
+				SizeBytes: 0,
+			})
+		}
+		return stats, nil
+	}
 	rows, err := db.Query(
 		`SELECT TABLE_NAME, TABLE_ROWS, DATA_LENGTH, INDEX_LENGTH
 		 FROM information_schema.tables
@@ -575,6 +656,34 @@ func (a *App) GetTables(db string) ([]TableMeta, error) {
 	if db == "" {
 		return nil, fmt.Errorf("数据库名不能为空")
 	}
+	if a.currentDBType == "oracle" {
+		rows, err := a.db.Query(
+			fmt.Sprintf(
+				"SELECT TABLE_NAME, NUM_ROWS FROM ALL_TABLES WHERE OWNER = '%s' ORDER BY TABLE_NAME",
+				escapeSQLLiteral(strings.ToUpper(db)),
+			),
+		)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+
+		var tables []TableMeta
+		for rows.Next() {
+			var name string
+			var rowsCount sql.NullInt64
+			if err := rows.Scan(&name, &rowsCount); err != nil {
+				return nil, err
+			}
+			tables = append(tables, TableMeta{
+				Name:      name,
+				Rows:      rowsCount.Int64,
+				SizeBytes: 0,
+			})
+		}
+		return tables, nil
+	}
+
 	rows, err := a.db.Query(
 		`SELECT TABLE_NAME, TABLE_ROWS, DATA_LENGTH, INDEX_LENGTH
 		 FROM information_schema.tables
@@ -619,6 +728,29 @@ func (a *App) GetViews(db string) ([]ViewMeta, error) {
 	if db == "" {
 		return nil, fmt.Errorf("数据库名不能为空")
 	}
+	if a.currentDBType == "oracle" {
+		rows, err := a.db.Query(
+			fmt.Sprintf(
+				"SELECT VIEW_NAME FROM ALL_VIEWS WHERE OWNER = '%s' ORDER BY VIEW_NAME",
+				escapeSQLLiteral(strings.ToUpper(db)),
+			),
+		)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+
+		var views []ViewMeta
+		for rows.Next() {
+			var name string
+			if err := rows.Scan(&name); err != nil {
+				return nil, err
+			}
+			views = append(views, ViewMeta{Name: name})
+		}
+		return views, nil
+	}
+
 	rows, err := a.db.Query(
 		`SELECT TABLE_NAME
 		 FROM information_schema.tables
@@ -649,6 +781,32 @@ func (a *App) GetColumns(db string) ([]ColumnMeta, error) {
 	if db == "" {
 		return nil, fmt.Errorf("数据库名不能为空")
 	}
+	if a.currentDBType == "oracle" {
+		rows, err := a.db.Query(
+			fmt.Sprintf(
+				`SELECT TABLE_NAME, COLUMN_NAME
+				 FROM ALL_TAB_COLUMNS
+				 WHERE OWNER = '%s'
+				 ORDER BY TABLE_NAME, COLUMN_ID`,
+				escapeSQLLiteral(strings.ToUpper(db)),
+			),
+		)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+
+		var cols []ColumnMeta
+		for rows.Next() {
+			var t, c string
+			if err := rows.Scan(&t, &c); err != nil {
+				return nil, err
+			}
+			cols = append(cols, ColumnMeta{Table: t, Column: c})
+		}
+		return cols, nil
+	}
+
 	rows, err := a.db.Query(
 		`SELECT TABLE_NAME, COLUMN_NAME
 		 FROM information_schema.columns
@@ -1123,6 +1281,9 @@ func copyTableDataDirect(srcDB *sql.DB, sourceDB string, tgtDB *sql.DB, targetDB
 
 // ExportSqlDump 使用开源库导出SQL（结构/数据/结构+数据）
 func (a *App) ExportSqlDump(cfg DBConfig, tables []string, mode string) (string, error) {
+	if normalizeDBType(cfg.Type) != "mysql" {
+		return "", fmt.Errorf("当前连接类型暂不支持SQL导出")
+	}
 	if a.ctx == nil {
 		return "", fmt.Errorf("应用未初始化")
 	}
@@ -1209,6 +1370,9 @@ func (a *App) ExportSqlDump(cfg DBConfig, tables []string, mode string) (string,
 
 // SyncDatabase 同步数据库（结构/数据/结构+数据）
 func (a *App) SyncDatabase(source DBConfig, sourceDB string, target DBConfig, targetDB string, mode string, tables []string) ([]MigrationCheckRow, error) {
+	if normalizeDBType(source.Type) != "mysql" || normalizeDBType(target.Type) != "mysql" {
+		return nil, fmt.Errorf("当前仅支持MySQL之间同步")
+	}
 	if sourceDB == "" || targetDB == "" {
 		return nil, fmt.Errorf("源库和目标库不能为空")
 	}
@@ -1381,9 +1545,24 @@ func filterDump(input string, keepSchema bool, keepData bool) string {
 	return strings.Join(out, "\n")
 }
 
-func buildDSN(cfg DBConfig) (string, error) {
+func buildDriverAndDSN(cfg DBConfig) (string, string, error) {
 	if cfg.Host == "" || cfg.User == "" || cfg.Port == 0 {
-		return "", fmt.Errorf("连接信息不完整")
+		return "", "", fmt.Errorf("连接信息不完整")
+	}
+	dbType := normalizeDBType(cfg.Type)
+	if dbType == "oracle" {
+		connectDB := cfg.Database
+		if connectDB == "" {
+			connectDB = "XEPDB1"
+		}
+		dsn := fmt.Sprintf("oracle://%s:%s@%s:%d/%s",
+			url.QueryEscape(cfg.User),
+			url.QueryEscape(cfg.Password),
+			cfg.Host,
+			cfg.Port,
+			url.PathEscape(connectDB),
+		)
+		return "oracle", dsn, nil
 	}
 	conf := mysqlDriver.NewConfig()
 	conf.User = cfg.User
@@ -1391,5 +1570,25 @@ func buildDSN(cfg DBConfig) (string, error) {
 	conf.Net = "tcp"
 	conf.Addr = fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
 	conf.DBName = cfg.Database
-	return conf.FormatDSN(), nil
+	return "mysql", conf.FormatDSN(), nil
+}
+
+func buildDSN(cfg DBConfig) (string, error) {
+	_, dsn, err := buildDriverAndDSN(cfg)
+	return dsn, err
+}
+
+func normalizeDBType(t string) string {
+	switch strings.ToLower(strings.TrimSpace(t)) {
+	case "", "mysql":
+		return "mysql"
+	case "oracle":
+		return "oracle"
+	default:
+		return "mysql"
+	}
+}
+
+func escapeSQLLiteral(s string) string {
+	return strings.ReplaceAll(s, "'", "''")
 }

@@ -51,6 +51,7 @@ const { Text, Title } = Typography;
 type DBConfig = {
   id: string;
   name: string;
+  type: 'mysql' | 'oracle';
   host: string;
   port: number;
   user: string;
@@ -153,12 +154,15 @@ const App: React.FC = () => {
   const [sessionInterval, setSessionInterval] = useState(5);
   const [selectedSessionIds, setSelectedSessionIds] = useState<number[]>([]);
   const [dbFilter, setDbFilter] = useState('');
+  const [siderWidth, setSiderWidth] = useState<number>(320);
 
   const [queryTabs, setQueryTabs] = useState<QueryTab[]>([]);
   const [activeTabKey, setActiveTabKey] = useState<string>('');
   const [sqlPaneHeight, setSqlPaneHeight] = useState<number>(380);
   const isResizingRef = useRef(false);
+  const isSiderResizingRef = useRef(false);
   const workspaceRef = useRef<HTMLDivElement | null>(null);
+  const mainLayoutRef = useRef<HTMLDivElement | null>(null);
   const tabSeq = useRef(1);
   const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null);
   const monacoRef = useRef<typeof Monaco | null>(null);
@@ -169,6 +173,37 @@ const App: React.FC = () => {
   const completionRegistered = useRef(false);
 
   const [form] = Form.useForm();
+
+  const normalizeConnType = (t?: string): 'mysql' | 'oracle' => {
+    return t === 'oracle' ? 'oracle' : 'mysql';
+  };
+
+  const quoteIdent = (name: string, connType?: string) => {
+    if (normalizeConnType(connType) === 'oracle') {
+      return `"${String(name || '').replace(/"/g, '""')}"`;
+    }
+    return `\`${String(name || '').replace(/`/g, '``')}\``;
+  };
+
+  const switchDatabase = async (conn: DBConfig, dbName: string) => {
+    const db = String(dbName || '').trim();
+    if (!db) return;
+    const type = normalizeConnType(conn.type);
+    if (type === 'oracle') {
+      await ExecuteQuery(`ALTER SESSION SET CURRENT_SCHEMA = ${quoteIdent(db, type)}`);
+      return;
+    }
+    await ExecuteQuery(`USE ${quoteIdent(db, type)}`);
+  };
+
+  const buildSelectTopSQL = (conn: DBConfig, objName: string) => {
+    const type = normalizeConnType(conn.type);
+    const qName = quoteIdent(objName, type);
+    if (type === 'oracle') {
+      return `SELECT * FROM ${qName} WHERE ROWNUM <= 200`;
+    }
+    return `SELECT * FROM ${qName} LIMIT 200;`;
+  };
 
   // --- 初始化 ---
   useEffect(() => {
@@ -188,7 +223,10 @@ const App: React.FC = () => {
   const fetchSavedConnections = async () => {
     try {
       const res = await GetSavedConnections();
-      const list = (res || []) as DBConfig[];
+      const list = ((res || []) as DBConfig[]).map((c: any) => ({
+        ...c,
+        type: normalizeConnType(c?.type)
+      }));
       setConnections(list);
       setConnStatus(prev => {
         const next: Record<string, ConnStatus> = { ...prev };
@@ -218,7 +256,7 @@ const App: React.FC = () => {
     return {
       key: `query-${Date.now()}-${seq}`,
       title: `Query ${seq}`,
-      sql: 'SHOW TABLES;',
+      sql: '',
       columns: [],
       data: [],
       loading: false,
@@ -229,19 +267,32 @@ const App: React.FC = () => {
     } as QueryTab;
   };
 
-  const addTab = () => {
+  const createSqlWindowForDb = async (conn: DBConfig, dbName: string) => {
     const next = createTab();
+    next.connId = conn.id;
+    next.dbName = dbName;
     setQueryTabs(prev => [...prev, next]);
     setActiveTabKey(next.key);
+    try {
+      await ConnectDBConfig(conn);
+      await switchDatabase(conn, dbName);
+      const cols = await GetColumns(dbName);
+      const tables = await GetTables(dbName);
+      suggestionRef.current = {
+        tables: (tables || []).map(t => t.name),
+        columns: (cols || []).map(c => ({ table: c.table, column: c.column }))
+      };
+    } catch (err) {
+      message.error('初始化 SQL 窗口失败: ' + err);
+    }
   };
 
   const removeTab = (targetKey: string) => {
     setQueryTabs(prev => {
       const next = prev.filter(tab => tab.key !== targetKey);
       if (next.length === 0) {
-        const fallback = createTab();
-        setActiveTabKey(fallback.key);
-        return [fallback];
+        setActiveTabKey('');
+        return [];
       }
       if (activeTabKey === targetKey) {
         setActiveTabKey(next[next.length - 1].key);
@@ -318,11 +369,11 @@ const App: React.FC = () => {
   const parseAliasMap = (sqlText: string) => {
     const map: Record<string, string> = {};
     const cleaned = sqlText.replace(/\s+/g, ' ');
-    const regex = /\b(from|join)\s+`?([a-zA-Z0-9_]+)`?(?:\s+as)?\s+`?([a-zA-Z0-9_]+)`?/gi;
+    const regex = /\b(from|join)\s+(?:"([^"]+)"|`([^`]+)`|([a-zA-Z0-9_$#]+))(?:\s+as)?\s+(?:"([^"]+)"|`([^`]+)`|([a-zA-Z0-9_$#]+))/gi;
     let match: RegExpExecArray | null;
     while ((match = regex.exec(cleaned)) !== null) {
-      const table = match[2];
-      const alias = match[3];
+      const table = match[2] || match[3] || match[4];
+      const alias = match[5] || match[6] || match[7];
       if (alias && alias !== table) {
         map[alias] = table;
       }
@@ -335,14 +386,14 @@ const App: React.FC = () => {
   const handleSaveConnection = async (values: any) => {
     try {
       if (editingConn) {
-        const updated = { ...editingConn, ...values } as DBConfig;
+        const updated = { ...editingConn, ...values, type: normalizeConnType(values?.type || editingConn.type) } as DBConfig;
         await UpdateConnection(updated);
         message.success('连接已更新');
         if (activeConn?.id === updated.id) {
           setActiveConn(updated);
         }
       } else {
-        const newConn = { ...values, id: Date.now().toString() } as DBConfig;
+        const newConn = { ...values, id: Date.now().toString(), type: normalizeConnType(values?.type) } as DBConfig;
         await SaveConnection(newConn);
         message.success('连接配置已保存');
       }
@@ -358,7 +409,7 @@ const App: React.FC = () => {
   const openCreateModal = () => {
     setEditingConn(null);
     form.resetFields();
-    form.setFieldsValue({ port: 3306 });
+    form.setFieldsValue({ type: 'mysql', port: 3306 });
     setIsModalOpen(true);
   };
 
@@ -366,6 +417,7 @@ const App: React.FC = () => {
     setEditingConn(conn);
     form.setFieldsValue({
       name: conn.name,
+      type: normalizeConnType(conn.type),
       host: conn.host,
       port: conn.port,
       user: conn.user,
@@ -417,12 +469,13 @@ const App: React.FC = () => {
 
   const handleTestConnection = async () => {
     try {
-      const values = await form.validateFields(['host', 'port', 'user', 'password', 'database']);
+      const values = await form.validateFields(['type', 'host', 'port', 'user', 'password', 'database']);
       const temp = {
         id: editingConn?.id || 'temp',
         name: editingConn?.name || 'temp',
+        type: normalizeConnType(values.type || editingConn?.type),
         host: values.host,
-        port: values.port || 3306,
+        port: values.port || (normalizeConnType(values.type || editingConn?.type) === 'oracle' ? 1521 : 3306),
         user: values.user,
         password: values.password || '',
         database: values.database || ''
@@ -453,6 +506,7 @@ const App: React.FC = () => {
       // 获取该连接下的库名
       const dbs = await GetDatabases();
       setDbList(prev => ({ ...prev, [conn.id]: dbs }));
+      setSiderOpenKeys(prev => (prev.includes(conn.id) ? prev : [...prev, conn.id]));
       message.success(`成功连接到 ${conn.name}`);
     } catch (err) {
       setConnStatus(prev => ({ ...prev, [conn.id]: 'error' }));
@@ -466,7 +520,7 @@ const App: React.FC = () => {
   const handleSelectDb = async (conn: DBConfig, dbName: string) => {
     try {
       await ConnectDBConfig(conn);
-      await ExecuteQuery(`USE \`${dbName}\``);
+      await switchDatabase(conn, dbName);
       updateActiveTab({ connId: conn.id, dbName });
       message.info(`当前数据库: ${dbName}`);
       const cols = await GetColumns(dbName);
@@ -498,7 +552,7 @@ const App: React.FC = () => {
   const loadDbObjects = async (conn: DBConfig, dbName: string) => {
     try {
       await ConnectDBConfig(conn);
-      await ExecuteQuery(`USE \`${dbName}\``);
+      await switchDatabase(conn, dbName);
       const tables = await GetTables(dbName);
       const views = await GetViews(dbName);
       setTableList(prev => ({
@@ -525,7 +579,7 @@ const App: React.FC = () => {
     if (tables.length === 0) {
       try {
         await ConnectDBConfig(conn);
-        await ExecuteQuery(`USE \`${dbName}\``);
+        await switchDatabase(conn, dbName);
         const fetched = await GetTables(dbName);
         tables = fetched || [];
         setTableList(prev => ({
@@ -665,7 +719,7 @@ const App: React.FC = () => {
     if (!conn) return;
     try {
       await ConnectDBConfig(conn);
-      await ExecuteQuery(`USE \`${dbName}\``);
+      await switchDatabase(conn, dbName);
       const tables = await GetTables(dbName);
       setTableList(prev => ({
         ...prev,
@@ -857,6 +911,15 @@ const App: React.FC = () => {
 
   useEffect(() => {
     const handleMove = (e: MouseEvent) => {
+      if (isSiderResizingRef.current && mainLayoutRef.current) {
+        const rect = mainLayoutRef.current.getBoundingClientRect();
+        const minSider = 260;
+        const minContent = 420;
+        const maxSider = Math.max(minSider, Math.min(760, rect.width - minContent));
+        const next = Math.max(minSider, Math.min(e.clientX - rect.left, maxSider));
+        setSiderWidth(next);
+        return;
+      }
       if (!isResizingRef.current) return;
       if (!workspaceRef.current) return;
       const rect = workspaceRef.current.getBoundingClientRect();
@@ -867,6 +930,7 @@ const App: React.FC = () => {
     };
     const handleUp = () => {
       isResizingRef.current = false;
+      isSiderResizingRef.current = false;
     };
     window.addEventListener('mousemove', handleMove);
     window.addEventListener('mouseup', handleUp);
@@ -938,9 +1002,9 @@ const App: React.FC = () => {
   };
 
   // 4. 运行 SQL
-  const runSqlText = async (tabKey: string, sqlText: string) => {
+  const runSqlText = async (tabKey: string, sqlText: string, tabOverride?: QueryTab) => {
     if (!sqlText.trim()) return;
-    const tab = queryTabs.find(t => t.key === tabKey);
+    const tab = tabOverride || queryTabs.find(t => t.key === tabKey);
     if (!tab?.connId) {
       message.warning('请先为该 Tab 选择连接与库');
       return;
@@ -954,7 +1018,7 @@ const App: React.FC = () => {
     try {
       await ConnectDBConfig(conn);
       if (tab.dbName) {
-        await ExecuteQuery(`USE \`${tab.dbName}\``);
+        await switchDatabase(conn, tab.dbName);
       }
       const start = performance.now();
       const result = await ExecuteQueryWithColumns(sqlText);
@@ -1181,10 +1245,15 @@ const App: React.FC = () => {
   const addQueryTabForDb = async (conn: DBConfig, db: string, sql: string, title?: string) => {
     try {
       await ConnectDBConfig(conn);
-      await ExecuteQuery(`USE \`${db}\``);
-      const tabKey = addQueryTabWithSql(sql, title);
-      updateTab(tabKey, { connId: conn.id, dbName: db });
-      setTimeout(() => runSqlText(tabKey, sql), 0);
+      await switchDatabase(conn, db);
+      const next = createTab();
+      next.sql = sql;
+      next.connId = conn.id;
+      next.dbName = db;
+      if (title) next.title = title;
+      setQueryTabs(prev => [...prev, next]);
+      setActiveTabKey(next.key);
+      setTimeout(() => runSqlText(next.key, sql, next), 0);
     } catch (err) {
       message.error('切换数据库失败: ' + err);
     }
@@ -1193,14 +1262,23 @@ const App: React.FC = () => {
   const showTableDdl = async (conn: DBConfig, db: string, table: string, isView: boolean) => {
     try {
       await ConnectDBConfig(conn);
-      await ExecuteQuery(`USE \`${db}\``);
-      const sql = isView
-        ? `SHOW CREATE VIEW \`${table}\`;`
-        : `SHOW CREATE TABLE \`${table}\`;`;
+      await switchDatabase(conn, db);
+      const type = normalizeConnType(conn.type);
+      const sql = type === 'oracle'
+        ? `SELECT DBMS_METADATA.GET_DDL('${isView ? 'VIEW' : 'TABLE'}', '${String(table || '').toUpperCase().replace(/'/g, "''")}', '${String(db || '').toUpperCase().replace(/'/g, "''")}') AS DDL FROM DUAL`
+        : (isView
+          ? `SHOW CREATE VIEW ${quoteIdent(table, type)};`
+          : `SHOW CREATE TABLE ${quoteIdent(table, type)};`);
       const result = await ExecuteQuery(sql);
       const first = result && result[0] ? result[0] : {};
-      const ddlKey = Object.keys(first).find(k => k.toLowerCase().includes('create')) || '';
-      const ddl = ddlKey ? String(first[ddlKey]) : JSON.stringify(first, null, 2);
+      const keys = Object.keys(first);
+      const ddlKey = keys.find(k => {
+        const low = k.toLowerCase();
+        return low.includes('create') || low === 'ddl';
+      }) || '';
+      const ddl = ddlKey
+        ? String(first[ddlKey] ?? '')
+        : (keys.length === 1 ? String(first[keys[0]] ?? '') : JSON.stringify(first, null, 2));
       addDdlTab(`DDL - ${table}`, ddl);
     } catch (err) {
       message.error('获取DDL失败: ' + err);
@@ -1230,12 +1308,10 @@ const App: React.FC = () => {
   const renderConnLabel = (conn: DBConfig) => (
     <div
       className="tree-node"
-      onClick={() => handleConnect(conn)}
-      onDoubleClick={() => handleConnect(conn)}
       onContextMenu={(e) => openTreeContextMenu(e, { type: 'conn', conn })}
     >
       <span className={`status-dot status-${connStatus[conn.id] || 'disconnected'}`} />
-      <span className="tree-label">{conn.name}</span>
+      <span className="tree-label" title={conn.name}>{conn.name}</span>
     </div>
   );
 
@@ -1244,7 +1320,7 @@ const App: React.FC = () => {
       className="tree-node"
       onContextMenu={(e) => openTreeContextMenu(e, { type: 'db', conn, db })}
     >
-      <span className="tree-label">{db}</span>
+      <span className="tree-label" title={db}>{db}</span>
     </div>
   );
 
@@ -1253,7 +1329,7 @@ const App: React.FC = () => {
       className="tree-node tree-row"
       onContextMenu={(e) => openTreeContextMenu(e, { type: 'table', conn, db, table })}
     >
-      <span className="tree-label">{table.name}</span>
+      <span className="tree-label" title={table.name}>{table.name}</span>
     </div>
   );
 
@@ -1262,7 +1338,7 @@ const App: React.FC = () => {
       className="tree-node tree-row"
       onContextMenu={(e) => openTreeContextMenu(e, { type: 'view', conn, db, view })}
     >
-      <span className="tree-label">{view.name}</span>
+      <span className="tree-label" title={view.name}>{view.name}</span>
     </div>
   );
 
@@ -1273,18 +1349,22 @@ const App: React.FC = () => {
     const items: { key: string; label: string; icon?: React.ReactNode; onClick: () => void }[] = [];
 
     if (menu.type === 'conn') {
+      items.push({ key: 'connect', label: '连接', icon: <DatabaseOutlined />, onClick: () => handleConnect(menu.conn) });
+      if (normalizeConnType(menu.conn.type) === 'mysql') {
+        items.push({ key: 'sessions', label: '会话管理', icon: <DesktopOutlined />, onClick: () => openSessionTab() });
+      }
       items.push(
-        { key: 'connect', label: '连接', icon: <DatabaseOutlined />, onClick: () => handleConnect(menu.conn) },
-        { key: 'sessions', label: '会话管理', icon: <DesktopOutlined />, onClick: () => openSessionTab() },
         { key: 'edit', label: '编辑', icon: <EditOutlined />, onClick: () => openEditModal(menu.conn) },
         { key: 'delete', label: '删除', icon: <DeleteOutlined />, onClick: () => handleDeleteConnection(menu.conn) }
       );
     } else if (menu.type === 'db') {
       items.push(
-        { key: 'use', label: '切换到该库', icon: <DatabaseOutlined />, onClick: () => handleSelectDb(menu.conn, menu.db) },
-        { key: 'refresh', label: '刷新对象', icon: <ReloadOutlined />, onClick: () => handleSelectDb(menu.conn, menu.db) },
-        { key: 'export', label: '导出SQL', icon: <FileTextOutlined />, onClick: () => openExportModal(menu.conn, menu.db) }
+        { key: 'create-sql', label: '创建SQL窗口', icon: <ConsoleSqlOutlined />, onClick: () => createSqlWindowForDb(menu.conn, menu.db) },
+        { key: 'refresh', label: '刷新对象', icon: <ReloadOutlined />, onClick: () => handleSelectDb(menu.conn, menu.db) }
       );
+      if (normalizeConnType(menu.conn.type) === 'mysql') {
+        items.push({ key: 'export', label: '导出SQL', icon: <FileTextOutlined />, onClick: () => openExportModal(menu.conn, menu.db) });
+      }
     } else if (menu.type === 'table') {
       items.push(
         {
@@ -1293,7 +1373,7 @@ const App: React.FC = () => {
           icon: <TableOutlined />,
           onClick: () => {
             if (!activeConn) return;
-            addQueryTabForDb(menu.conn, menu.db, `SELECT * FROM \`${menu.table.name}\` LIMIT 200;`, `Data - ${menu.table.name}`);
+            addQueryTabForDb(menu.conn, menu.db, buildSelectTopSQL(menu.conn, menu.table.name), `Data - ${menu.table.name}`);
           }
         },
         {
@@ -1314,7 +1394,7 @@ const App: React.FC = () => {
           icon: <TableOutlined />,
           onClick: () => {
             if (!activeConn) return;
-            addQueryTabForDb(menu.conn, menu.db, `SELECT * FROM \`${menu.view.name}\` LIMIT 200;`, `Data - ${menu.view.name}`);
+            addQueryTabForDb(menu.conn, menu.db, buildSelectTopSQL(menu.conn, menu.view.name), `Data - ${menu.view.name}`);
           }
         },
         {
@@ -1363,7 +1443,9 @@ const App: React.FC = () => {
     return {
       key: conn.id,
       label: renderConnLabel(conn),
-      icon: <img src={mysqlLogo} alt="MySQL" style={{ width: 16, height: 16 }} />,
+      icon: normalizeConnType(conn.type) === 'oracle'
+        ? <DatabaseOutlined style={{ color: '#ef4444' }} />
+        : <img src={mysqlLogo} alt="MySQL" style={{ width: 16, height: 16 }} />,
       children: dbs.length > 0
         ? dbs.map(db => {
           const tables = tableList[conn.id]?.[db] || [];
@@ -1402,6 +1484,7 @@ const App: React.FC = () => {
 
   const managerColumns = [
     { title: '名称', dataIndex: 'name', key: 'name' },
+    { title: '类型', dataIndex: 'type', key: 'type', width: 90, render: (v: string) => normalizeConnType(v).toUpperCase() },
     { title: 'Host', dataIndex: 'host', key: 'host' },
     { title: 'Port', dataIndex: 'port', key: 'port', width: 90 },
     { title: 'User', dataIndex: 'user', key: 'user', width: 120 },
@@ -1486,16 +1569,15 @@ const App: React.FC = () => {
           <div className="header-toolbar">
             <Button size="small" icon={<DatabaseOutlined />} />
             <Button size="small" icon={<ReloadOutlined />} onClick={() => activeConn && handleConnect(activeConn)} />
-            <Button size="small" icon={<ConsoleSqlOutlined />} onClick={addTab} />
             <Button size="small" icon={<DesktopOutlined />} onClick={openSessionTab} />
             <Button size="small" icon={<DatabaseOutlined />} onClick={openMigrationTab} />
           </div>
         </div>
       </Header>
 
-      <Layout>
+      <Layout className="app-main-layout" ref={mainLayoutRef}>
         {/* 左侧侧边栏 */}
-        <Sider width={300} theme="light" className="app-sider">
+        <Sider width={siderWidth} theme="light" className="app-sider">
           <div className="sider-header">
             <div>
               <Text strong className="sider-title">连接管理</Text>
@@ -1546,6 +1628,12 @@ const App: React.FC = () => {
             }}
           />
         </Sider>
+        <div
+          className="sider-resizer"
+          onMouseDown={() => {
+            isSiderResizingRef.current = true;
+          }}
+        />
 
         {/* 右侧主工作区 */}
         <Content className="app-content">
@@ -1555,7 +1643,7 @@ const App: React.FC = () => {
               <Card
                 className="sql-card"
                 size="small"
-                style={activeTab?.kind === 'migration'
+                style={(activeTab?.kind === 'migration' || activeTab?.kind === 'ddl' || activeTab?.kind === 'session')
                   ? { flex: 1, minHeight: 0 }
                   : { height: sqlPaneHeight, minHeight: 220 }}
                 title={
@@ -1581,8 +1669,8 @@ const App: React.FC = () => {
                   type="editable-card"
                   activeKey={activeTabKey}
                   onChange={setActiveTabKey}
+                  hideAdd
                   onEdit={(targetKey, action) => {
-                    if (action === 'add') addTab();
                     if (action === 'remove' && typeof targetKey === 'string') removeTab(targetKey);
                   }}
                   items={queryTabs.map(tab => ({
@@ -1590,7 +1678,23 @@ const App: React.FC = () => {
                     label: tab.title,
                     children: tab.kind === 'ddl' ? (
                       <div className="ddl-pane">
-                        <pre className="ddl-content">{tab.content || ''}</pre>
+                        <Editor
+                          height="100%"
+                          language="sql"
+                          value={tab.content || ''}
+                          options={{
+                            readOnly: true,
+                            minimap: { enabled: false },
+                            fontSize: 13,
+                            fontFamily: '"JetBrains Mono", "Fira Code", "SFMono-Regular", Menlo, monospace',
+                            lineNumbers: 'on',
+                            scrollbar: { verticalScrollbarSize: 6, horizontalScrollbarSize: 6 },
+                            overviewRulerBorder: false,
+                            scrollBeyondLastLine: false,
+                            wordWrap: 'on',
+                            contextmenu: true
+                          }}
+                        />
                       </div>
                     ) : tab.kind === 'session' ? (
                       <div className="session-page">
@@ -1950,11 +2054,12 @@ const App: React.FC = () => {
                                   provideCompletionItems: (model, position) => {
                                     const line = model.getLineContent(position.lineNumber);
                                     const prefix = line.slice(0, position.column - 1);
-                                    const tableMatch = prefix.match(/`?([a-zA-Z0-9_]+)`?\.$/);
+                                    const tableMatch = prefix.match(/(?:"([^"]+)"|`([^`]+)`|([a-zA-Z0-9_$#]+))\.$/);
                                     if (tableMatch) {
                                       const upToCursor = model.getValue().slice(0, model.getOffsetAt(position));
                                       const aliasMap = parseAliasMap(upToCursor);
-                                      const tableName = aliasMap[tableMatch[1]] || tableMatch[1];
+                                      const inputTableName = tableMatch[1] || tableMatch[2] || tableMatch[3];
+                                      const tableName = aliasMap[inputTableName] || inputTableName;
                                       const range = new monaco.Range(
                                         position.lineNumber,
                                         position.column,
@@ -1966,7 +2071,7 @@ const App: React.FC = () => {
                                         .map(col => ({
                                           label: col.column,
                                           kind: monaco.languages.CompletionItemKind.Field,
-                                          insertText: `\`${col.column}\``,
+                                          insertText: col.column,
                                           range,
                                           detail: tableName
                                         }));
@@ -1981,13 +2086,13 @@ const App: React.FC = () => {
                                     const tables = suggestionRef.current.tables.map(name => ({
                                       label: name,
                                       kind: monaco.languages.CompletionItemKind.Class,
-                                      insertText: `\`${name}\``,
+                                      insertText: name,
                                       range
                                     }));
                                     const columns = suggestionRef.current.columns.map(col => ({
                                       label: `${col.table}.${col.column}`,
                                       kind: monaco.languages.CompletionItemKind.Field,
-                                      insertText: `\`${col.column}\``,
+                                      insertText: col.column,
                                       range,
                                       detail: col.table
                                     }));
@@ -2101,7 +2206,7 @@ const App: React.FC = () => {
                             sticky
                             rowKey={(record, index) => record?.id ?? record?._id ?? index ?? Math.random()}
                             pagination={{ defaultPageSize: 10, showSizeChanger: true }}
-                            scroll={{ x: 'max-content' }}
+                            scroll={{ x: 'max-content', y: 420 }}
                             tableLayout="fixed"
                           />
                         </div>
@@ -2252,6 +2357,18 @@ const App: React.FC = () => {
           <Form.Item name="name" label="连接名称" rules={[{ required: true, message: '请输入名称' }]}>
             <Input placeholder="例如: 本地测试环境" />
           </Form.Item>
+          <Form.Item name="type" label="数据库类型" initialValue="mysql" rules={[{ required: true, message: '请选择数据库类型' }]}>
+            <Select
+              options={[
+                { label: 'MySQL', value: 'mysql' },
+                { label: 'Oracle', value: 'oracle' }
+              ]}
+              onChange={(value) => {
+                const nextPort = value === 'oracle' ? 1521 : 3306;
+                form.setFieldValue('port', nextPort);
+              }}
+            />
+          </Form.Item>
           <Form.Item name="host" label="Host" rules={[{ required: true, message: '请输入主机地址' }]}>
             <Input placeholder="127.0.0.1" />
           </Form.Item>
@@ -2264,11 +2381,18 @@ const App: React.FC = () => {
           <Form.Item name="password" label="Password">
             <Input.Password placeholder="密码(可选)" />
           </Form.Item>
-          <Form.Item name="database" label="Database">
-            <Input placeholder="默认数据库(可选)" />
+          <Form.Item shouldUpdate noStyle>
+            {() => {
+              const currentType = normalizeConnType(form.getFieldValue('type'));
+              return (
+                <Form.Item name="database" label={currentType === 'oracle' ? 'Service Name' : 'Database'}>
+                  <Input placeholder={currentType === 'oracle' ? '例如: XEPDB1 (可选，默认XEPDB1)' : '默认数据库(可选)'} />
+                </Form.Item>
+              );
+            }}
           </Form.Item>
           <Text type="secondary" style={{ fontSize: '12px' }}>
-            连接信息将以 Host/Port/User 形式保存，启动后可直接复用。
+            连接信息将保存在本地，Oracle 默认端口 1521，MySQL 默认端口 3306。
           </Text>
         </Form>
       </Modal>
